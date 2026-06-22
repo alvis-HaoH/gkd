@@ -1,0 +1,17 @@
+# 模型注册表(含端点/认证环境变量,按用户/部署不同,不入库)
+config/models.json
+
+# macOS
+.DS_Store
+
+# Node
+node_modules/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 临时文件
+*.draft
+*.tmp
