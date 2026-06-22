@@ -1,5 +1,5 @@
 ---
-description: 把任务委派给便宜模型(默认 GLM)。默认只读;--write 可改文件;--glm/--kimi/--deepseek 选模型;--with-context 带主对话历史。
+description: 把任务委派给便宜模型(默认 GLM)。默认只读;--write 可改文件;--glm/--kimi/--gpt 选模型;--with-context 带主对话历史。
 argument-hint: '[--<model>] [--with-context] <任务(含文件路径)>'
 allowed-tools: Bash(node:*)
 ---

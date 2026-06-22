@@ -8,7 +8,7 @@
 //                        [--allowed-tools "Read Grep Glob"] [--json] [--help] "<任务文本(含文件路径)>"
 //
 // 模型选择:
-//   --<modelKey> 是 config/models.json 里的 key(任意一个),例如 --glm / --gpt / --gemini。
+//   --<modelKey> 是 config/models.json 里的 key(任意一个),例如 --glm / --kimi / --gpt。
 //   不写则使用第一个未禁用的模型。运行 `--help` 查看当前可用模型列表。
 //
 // 上下文三档:
@@ -17,7 +17,7 @@
 //   --with-context  (C) 让子进程加载主 Claude 当前对话历史(fork,只读继承,主 token 几乎免费)
 
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,6 +57,7 @@ function loadModels() {
 // ── 状态文件(记录上次子进程 session-id,供 --resume 用,按 cwd 区分)──────
 const STATE_DIR = join(homedir(), ".claude", "gkd");
 const STATE_FILE = join(STATE_DIR, "sessions.json");
+const USAGE_FILE = join(STATE_DIR, "usage.jsonl");
 
 function readState() {
   try {
@@ -71,6 +72,16 @@ function writeLastSession(cwd, sessionId) {
   const state = readState();
   state[cwd] = { sessionId, ts: new Date().toISOString() };
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
+// 每次委派的 token 用量追加一行 JSONL,供 /gkd:stats 统计。失败不让 runtime 崩。
+function writeUsageLog(entry) {
+  try {
+    if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
+    appendFileSync(USAGE_FILE, JSON.stringify(entry) + "\n");
+  } catch (e) {
+    process.stderr.write(`[gkd] 写 usage 日志失败(忽略): ${e.message}\n`);
+  }
 }
 
 // ── 参数解析 ──────────────────────────────────────────────────────────
@@ -213,6 +224,7 @@ function main() {
   const { args: claudeArgs, envOverride } = buildSpawn(opts, cwd, models);
   const cli = process.env.GKD_CLAUDE_BIN || "claude";
 
+  const startMs = Date.now();
   const child = spawn(cli, claudeArgs, { env: childEnv(envOverride), stdio: ["ignore", "pipe", "pipe"] });
 
   let stdout = "";
@@ -233,6 +245,17 @@ function main() {
     const result = parsed.result ?? "";
     const modelUsed = parsed.modelUsage ? Object.keys(parsed.modelUsage) : [];
     writeLastSession(cwd, parsed.session_id);
+    writeUsageLog({
+      ts: new Date().toISOString(),
+      modelKey: opts.model,
+      model: modelUsed,
+      mode: opts.withContext ? "with-context" : opts.resume ? "resume" : "clean",
+      write: opts.write,
+      cwd,
+      ok: !parsed.is_error,
+      durationMs: Date.now() - startMs,
+      usage: parsed.modelUsage ?? {},
+    });
 
     if (opts.json) {
       // 结构化输出,供命令/workflow 消费

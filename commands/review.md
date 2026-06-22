@@ -1,5 +1,5 @@
 ---
-description: 委派一个便宜模型对本地 git 改动做代码审查。只读不改文件。可用 --<modelKey> 指定模型(GLM 默认/GPT 严苛/Gemini 视觉等,见 config/models.json)。
+description: 委派一个便宜模型对本地 git 改动做代码审查。只读不改文件。可用 --<modelKey> 指定模型
 argument-hint: '[--<model>][--base <ref>] [--scope auto|working-tree|branch] [--wait|--background] [<额外关注点>]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
