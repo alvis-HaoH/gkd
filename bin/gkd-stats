@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# gkd-stats —— 直接跑 GKD 委派统计脚本,不经过 Claude 模型。
+# 想要走 slash command (会过一次模型) 就用 /gkd:stats;想零模型成本看数就用本入口。
+exec node "$(dirname "$0")/../scripts/gkd-stats.mjs" "$@"
