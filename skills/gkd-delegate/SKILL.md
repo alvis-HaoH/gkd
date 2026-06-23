@@ -64,12 +64,51 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/gkd-runtime.mjs" --<modelKey> "<任务>"
 
 ## 调用方式
 
+### 用户视角(slash 命令)
+
+| 命令 | 权限 | 用途 |
+|---|---|---|
+| `/gkd:ask <任务>` | **只读**(Read/Grep/Glob/Bash(git:*)) | 问/分析/审/咨询 |
+| `/gkd:do <任务>` | **读写**(+Edit/Write/Bash) | 改文件/落盘/执行 |
+| `/gkd:resume <补充>` | 自动从上次会话继承 mode | 续线程 |
+| `/gkd:review` | 只读 | 代码审查专用 |
+| `/gkd:brainstorm` | 只读 | 多模型并行发散 |
+| `/gkd:workflow` | 视任务而定 | N 个 item 批量委派 |
+
+ask/do 命令会**让主 Claude 智能补 `--with-context`**(任务自洽性不明就补;不确定就反问用户)。
+
+### 直接调用 runtime
+
 ```
 node "${CLAUDE_PLUGIN_ROOT}/scripts/gkd-runtime.mjs" [--<modelKey>] [选项] "<任务>"
 ```
 
 完整选项表运行 `--help` 查看,或读 `scripts/gkd-runtime.mjs` 顶部注释。
-关键开关:`--write`(允许改文件)、`--resume`(续上次线程)、`--with-context`(带主对话历史)、`--json`(结构化输出)。
+关键开关:`--write`(允许改文件)、`--resume`(续上次线程,**自动从 sessions.json 继承上次的 mode**;显式 `--write` 永远胜过继承)、`--with-context`(带主对话历史)、`--json`(结构化输出)。
+
+### 运行模式: **默认 Bash 后台**
+
+主 Claude 调 runtime 时,Bash 工具默认 `timeout: 120000`(2 分钟)。委派任务常涉及装库、批量改、几万行处理、N 次 LLM 调用——**经常超 2 分钟**。前台超时 = 子进程被杀 + 已跑的进度全丢。
+
+**铁律**:
+
+| 情况 | 怎么跑 |
+|---|---|
+| **默认 / 任务规模不清** | Bash 工具传 `run_in_background: true` |
+| 任务可能 > 1 分钟 | **铁定后台** |
+| brainstorm(N 个模型并行) | **永远后台** |
+| **仅当**确信 < 30 秒(回答一行追问 / 改单文件一两行) | 前台,**必须**传 `timeout: 600000`(永远不要用默认 120000) |
+
+**永远不要**用 Bash 默认 2 分钟超时跑 GKD 委派——杀子进程不可逆,丢进度。
+
+不确定时**选后台**:对快任务的代价仅是多一次完成通知;对慢任务的代价是浪费一切已跑进度 + 主 Claude 卡死。
+
+后台启动后:
+1. 立刻把 task_id 报给用户:"GKD 委派已在后台启动(task: `<id>`),跑完会通知你。"
+2. **不要** TaskOutput 阻塞等待——还控制权给用户。
+3. 收到 `<task-notification>` 后,用 Read 读 task 的 `.output` 文件,把 result 部分汇报给用户。
+
+各 slash 命令文件已把这套规则写进各自的 step 4——执行时跟着命令文件做即可。
 
 ## 铁律(技术约束,违反委派失效)
 

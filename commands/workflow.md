@@ -58,8 +58,8 @@ allowed-tools: Read, Glob, Grep, Bash(node:*), Workflow
 - 用 Glob/Bash(git:*)只拿**路径列表**,不拿内容。
 - 不要在 workflow 脚本外另起一遍 Read——所有读文件都该发生在 runtime 子进程里。
 
-## 何时该用 /gkd:workflow vs 直接 /gkd
+## 何时该用 /gkd:workflow vs 单次 /gkd:ask|do
 
-- `/gkd <任务>`:**单次** 委派,一个产出
+- `/gkd:ask <任务>` / `/gkd:do <任务>`:**单次** 委派,一个产出
 - `/gkd:workflow <批量任务>`:**N 次** 同构委派,每个 item 一个产出,并行
-若 N=1 或 N=2,直接用 `/gkd` 顺序调两次更简单。N≥5 且任务同构时,`/gkd:workflow` 才有编排收益。
+若 N=1 或 N=2,直接用 `/gkd:ask`/`/gkd:do` 顺序调两次更简单。N≥5 且任务同构时,`/gkd:workflow` 才有编排收益。

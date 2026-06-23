@@ -244,7 +244,7 @@ function renderHuman({ days, all, byModel, actualCostUsd, opusCostUsd, priceMiss
   lines.push("");
 
   if (all.calls === 0) {
-    lines.push("还没有委派记录。先用 /gkd 委派几次再来看 :)");
+    lines.push("还没有委派记录。先用 /gkd:ask 或 /gkd:do 委派几次再来看 :)");
     return lines.join("\n");
   }
 

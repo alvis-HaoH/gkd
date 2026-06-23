@@ -17,7 +17,7 @@
 //   --with-context  (C) 让子进程加载主 Claude 当前对话历史(fork,只读继承,主 token 几乎免费)
 
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,6 +54,42 @@ function loadModels() {
   return raw.models;
 }
 
+// ── 主对话 session jsonl 定位(供 --with-context 找文件)──────────────────
+// Claude Code 把每个 session 的 jsonl 落在 ~/.claude/projects/<编码后的启动 cwd>/<sessionId>.jsonl。
+// 用户在会话中 cd 后,jsonl 仍在启动 cwd 对应的项目目录里,不会跟 process.cwd() 同步。
+// 所以 spawn 子进程时若直接继承漂移后的 cwd,claude --resume <id> 会按当前 cwd 编码找,找不到。
+// 这里扫所有 projects 目录定位 jsonl,读首行的 cwd 字段,返回原始启动 cwd —— spawn 时把 child 的
+// cwd override 成它,child claude 才能解析到正确的项目目录。
+function findSessionCwd(sessionId) {
+  if (!sessionId) return null;
+  const projectsDir = join(homedir(), ".claude", "projects");
+  if (!existsSync(projectsDir)) return null;
+  let entries;
+  try {
+    entries = readdirSync(projectsDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const jsonlPath = join(projectsDir, e.name, `${sessionId}.jsonl`);
+    if (!existsSync(jsonlPath)) continue;
+    // jsonl 的前几行可能是 metadata(type=mode/file-history-snapshot/ai-title 等)没有 cwd 字段,
+    // 真正带 cwd 的是首条 user/assistant/system 记录。扫前 50 行内拿第一个 cwd 即可。
+    try {
+      const lines = readFileSync(jsonlPath, "utf8").split("\n", 50);
+      for (const ln of lines) {
+        if (!ln) continue;
+        try {
+          const obj = JSON.parse(ln);
+          if (typeof obj?.cwd === "string" && obj.cwd) return obj.cwd;
+        } catch { /* 单行损坏跳过 */ }
+      }
+    } catch { /* 文件读不到跳过 */ }
+  }
+  return null;
+}
+
 // ── 状态文件(记录上次子进程 session-id,供 --resume 用,按 cwd 区分)──────
 const STATE_DIR = join(homedir(), ".claude", "gkd");
 const STATE_FILE = join(STATE_DIR, "sessions.json");
@@ -66,11 +102,11 @@ function readState() {
     return {};
   }
 }
-function writeLastSession(cwd, sessionId) {
+function writeLastSession(cwd, sessionId, mode) {
   if (!sessionId) return;
   if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
   const state = readState();
-  state[cwd] = { sessionId, ts: new Date().toISOString() };
+  state[cwd] = { sessionId, mode: mode === "write" ? "write" : "read", ts: new Date().toISOString() };
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
@@ -171,12 +207,24 @@ function buildSpawn(opts, cwd, models) {
   args.push("--permission-mode", opts.write ? "acceptEdits" : "default");
 
   // 上下文三档
+  let spawnCwd = null;  // 默认 null = 继承父进程 cwd
   if (opts.withContext) {
     // C 档:加载主 Claude 当前对话历史(fork → 只读继承,不污染主 session 文件)
     const mainSession = process.env.CLAUDE_CODE_SESSION_ID;
     if (!mainSession) {
       fail("--with-context 需要主对话 session-id,但未找到 CLAUDE_CODE_SESSION_ID");
     }
+    // 关键:child claude 按自己的 cwd 编码去找 ~/.claude/projects/<encoded-cwd>/<id>.jsonl,
+    // 但用户在主会话期间可能 cd 漂移过,jsonl 实际还在启动 cwd 那一档。
+    // 我们扫盘定位 jsonl 的真实归属 cwd,把 child 的 cwd 钉在那里,确保 --resume 能解析到。
+    const sessionOriginCwd = findSessionCwd(mainSession);
+    if (!sessionOriginCwd) {
+      fail(`--with-context 找不到主 session ${mainSession.slice(0, 8)}... 的 jsonl 文件(扫遍 ~/.claude/projects/*)。可能 session 还没落盘,或文件被清理了。`);
+    }
+    if (sessionOriginCwd !== cwd) {
+      process.stderr.write(`[gkd] --with-context: 检测到 cwd 漂移(用户 ${cwd} → 原 session ${sessionOriginCwd}),已 override 子进程 cwd 以定位 session 文件\n`);
+    }
+    spawnCwd = sessionOriginCwd;
     args.push("--resume", mainSession, "--fork-session");
   } else if (opts.resume) {
     // B 档:续上次本工具的委派线程
@@ -189,7 +237,11 @@ function buildSpawn(opts, cwd, models) {
   // A 档:什么都不加
 
   args.push("--output-format", "json");
-  return { args, envOverride: { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: authToken } };
+  return {
+    args,
+    envOverride: { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: authToken },
+    spawnCwd,
+  };
 }
 
 function fail(msg) {
@@ -221,11 +273,25 @@ function main() {
     fail("缺少任务文本。运行 gkd-runtime --help 查看用法。");
   }
 
-  const { args: claudeArgs, envOverride } = buildSpawn(opts, cwd, models);
+  // --resume 时,若用户没显式 --write,则从 state 继承上次会话的 mode。
+  // 显式 --write 永远胜过继承(用户的明确意图优先)。
+  if (opts.resume && !opts.write) {
+    const last = readState()[cwd];
+    if (last?.mode === "write") {
+      opts.write = true;
+      if (!opts.quiet) process.stderr.write(`[gkd] 续会话:从上次继承写模式\n`);
+    }
+  }
+
+  const { args: claudeArgs, envOverride, spawnCwd } = buildSpawn(opts, cwd, models);
   const cli = process.env.GKD_CLAUDE_BIN || "claude";
 
   const startMs = Date.now();
-  const child = spawn(cli, claudeArgs, { env: childEnv(envOverride), stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(cli, claudeArgs, {
+    env: childEnv(envOverride),
+    stdio: ["ignore", "pipe", "pipe"],
+    cwd: spawnCwd || undefined,  // null/undefined = 继承父进程 cwd(默认行为)
+  });
 
   let stdout = "";
   let stderr = "";
@@ -244,7 +310,7 @@ function main() {
 
     const result = parsed.result ?? "";
     const modelUsed = parsed.modelUsage ? Object.keys(parsed.modelUsage) : [];
-    writeLastSession(cwd, parsed.session_id);
+    writeLastSession(cwd, parsed.session_id, opts.write ? "write" : "read");
     writeUsageLog({
       ts: new Date().toISOString(),
       modelKey: opts.model,
