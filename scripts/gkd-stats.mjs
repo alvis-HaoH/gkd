@@ -181,9 +181,15 @@ function aggregate(entries, prices, models) {
         calls: 0, ok: 0, fail: 0,
         tokens: { input: 0, output: 0, cache_read: 0, cache_creation: 0 },
         costUsd: 0, priceable: 0,
+        // 展示用真实模型名:优先 models.json 的 model 字段,回退到 usage 记录里的 model,最后回退到 key
+        modelName: models[key]?.model || (Array.isArray(e.model) ? e.model[0] : e.model) || key,
       });
     }
     const slot = byModel.get(key);
+    if (slot.modelName === key) {
+      const resolved = models[key]?.model || (Array.isArray(e.model) ? e.model[0] : e.model);
+      if (resolved) slot.modelName = resolved;
+    }
     slot.calls++;
     if (e.ok) slot.ok++; else slot.fail++;
 
@@ -379,7 +385,7 @@ function renderHuman({ days, all, byModel, actualCostUsd, opusCostUsd, priceMiss
     const costPlain = noCost ? "—" : fmtUsd(s.costUsd);
     const dimDash = (p) => p === "—" ? c("dim", p) : p;
     return {
-      model:  { plain: key,         color: c256(colorOfModel(key), c("bold", key)) },
+      model:  { plain: s.modelName, color: c256(colorOfModel(key), c("bold", s.modelName)) },
       calls:  { plain: callsPlain,  color: callsColor },
       tokens: { plain: tokPlain,    color: dimDash(tokPlain) },
       cache:  { plain: cachePlain,  color: dimDash(cachePlain) },
