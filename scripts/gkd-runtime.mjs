@@ -191,6 +191,13 @@ function buildSpawn(opts, cwd, models) {
   if (!baseUrl) fail(`模型 ${opts.model} 的 baseUrl 为空(检查 config/models.json)`);
   if (!authToken) fail(`模型 ${opts.model} 的 authToken 为空(检查环境变量是否已 export)`);
 
+  // 模型可选 env:注入到子进程环境,支持 ${VAR} 插值。
+  // 用于按网关差异调整 CLI 行为,例如某些端点未适配 adaptive thinking,需 MAX_THINKING_TOKENS=0 关闭。
+  const modelEnv = {};
+  if (m.env && typeof m.env === "object") {
+    for (const [k, v] of Object.entries(m.env)) modelEnv[k] = expandEnv(String(v));
+  }
+
   const args = ["-p", opts.task];
   // 换脑:唯一可靠开关
   args.push("--model", m.model);
@@ -239,7 +246,7 @@ function buildSpawn(opts, cwd, models) {
   args.push("--output-format", "json");
   return {
     args,
-    envOverride: { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: authToken },
+    envOverride: { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: authToken, ...modelEnv },
     spawnCwd,
   };
 }
