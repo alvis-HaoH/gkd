@@ -1,11 +1,11 @@
 ---
-description: 委派一个便宜模型对本地 git 改动做代码审查。只读不改文件。可用 --<modelKey> 指定模型
+description: 委派模型对本地 git 改动做代码审查。只读不改文件。可用 --<modelKey> 指定模型
 argument-hint: '[--<model>][--base <ref>] [--scope auto|working-tree|branch] [--wait|--background] [<额外关注点>]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
 
-让一个便宜模型审查本地 git 改动。**这是 review-only:绝不修改文件,不给 patch,不暗示要改**。
+让一个委派模型审查本地 git 改动。**这是 review-only:绝不修改文件,不给 patch,不暗示要改**。
 你的工作是探测范围 → 估算大小 → 选执行模式 → 委派给 runtime → 把子进程的审查输出**逐字**返回用户。
 
 参考 `delegate` skill 的委派纪律:**绝不主动 Read 改动文件的内容**——让子进程自己读。

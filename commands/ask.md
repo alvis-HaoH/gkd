@@ -1,10 +1,10 @@
 ---
-description: 委派便宜模型回答/分析/审/咨询。**只读不改文件**(默认 Read/Grep/Glob + Bash(git:*))。主 Claude 会智能补 --with-context、选模型。
+description: 委派模型回答/分析/审/咨询。**只读不改文件**(默认 Read/Grep/Glob + Bash(git:*))。主 Claude 会智能补 --with-context、选模型。
 argument-hint: '[--<model>] [--with-context] <任务(可多行)>'
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
-把任务委派给便宜模型,**只读模式**——子进程不能改文件、不能跑除 `git:*` 外的 Bash。
+把任务委派给指定模型,**只读模式**——子进程不能改文件、不能跑除 `git:*` 外的 Bash。
 参考 `gkd-delegate` skill 的委派纪律。**铁律:不要自己 Read 文件内容再转发,只传文件路径,让子进程自己读。**
 
 原始参数(可能多行,可能含 `"`/`'`/`*`/`$` 等特殊字符):

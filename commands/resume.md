@@ -4,7 +4,7 @@ argument-hint: '[--<model>] <补充指令(可多行)>'
 allowed-tools: Bash(node:*)
 ---
 
-参考 `gkd-delegate` skill。续上次本目录的委派线程(B 档),让便宜模型接着上次的上下文继续干。
+参考 `gkd-delegate` skill。续上次本目录的委派线程(B 档),让委派模型接着上次的上下文继续干。
 **mode 由 runtime 从 `~/.claude/gkd/sessions.json` 自动继承**——上次是 `do`(写)就继续写,上次是 `ask`(读)就继续读。
 
 > 想把读模式的会话**升级**到写模式?直接用 `/gkd:do --resume <补充指令>`(显式传 --write 永远胜过继承)。

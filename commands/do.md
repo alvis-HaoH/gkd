@@ -1,10 +1,10 @@
 ---
-description: 委派便宜模型**改文件/落盘/执行**。隐含 --write(子进程获得 Edit/Write/Bash 全权)。主 Claude 会智能补 --with-context、选模型。
+description: 委派模型**改文件/落盘/执行**。隐含 --write(子进程获得 Edit/Write/Bash 全权)。主 Claude 会智能补 --with-context、选模型。
 argument-hint: '[--<model>] [--with-context] <任务(可多行)>'
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 
-把任务委派给便宜模型,**写模式**——子进程获得 Read/Grep/Glob/Edit/Write/Bash 全权,可改文件、可执行命令。
+把任务委派给指定模型,**写模式**——子进程获得 Read/Grep/Glob/Edit/Write/Bash 全权,可改文件、可执行命令。
 参考 `gkd-delegate` skill 的委派纪律。**铁律:不要自己 Read 文件内容再转发,只传文件路径,让子进程自己读。**
 
 原始参数(可能多行,可能含 `"`/`'`/`*`/`$` 等特殊字符):

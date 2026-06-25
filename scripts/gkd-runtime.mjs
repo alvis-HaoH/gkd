@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // gkd-runtime —— GKD 的换脑底座。
-// 借 Claude Code 的完整 harness,spawn 一个以便宜模型为大脑的 claude -p 子进程,
+// 借 Claude Code 的完整 harness,spawn 一个以委派模型(GLM/Kimi/GPT 等任意注册模型)为大脑的 claude -p 子进程,
 // 让它在自己的上下文里读文件/思考/迭代,只把结果回传。主 Claude 不烧重活的 token。
 //
 // 用法:
