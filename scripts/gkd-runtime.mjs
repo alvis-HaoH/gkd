@@ -129,6 +129,7 @@ function parseArgs(argv, modelKeys) {
     resume: false,
     withContext: false,
     allowedTools: null,
+    promptFile: null,      // --prompt-file:把文件内容作为前置系统指令注入子进程
     json: false,
     help: false,
     quiet: false,
@@ -137,11 +138,16 @@ function parseArgs(argv, modelKeys) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") opts.help = true;
-    else if (a === "--model") opts.model = argv[++i];
     else if (a === "--write") opts.write = true;
     else if (a === "--resume") opts.resume = true;
     else if (a === "--with-context") opts.withContext = true;
     else if (a === "--allowed-tools") opts.allowedTools = argv[++i];
+    else if (a === "--prompt-file") {
+      const v = argv[++i];
+      if (!v || v.startsWith("--")) fail("--prompt-file 需要一个文件路径参数");
+      opts.promptFile = v;
+    }
+    else if (a === "--model") fail("--model 已废弃,请用 --<modelKey>(如 --glm),见 --help");
     else if (a === "--json") opts.json = true;
     else if (a === "--quiet") opts.quiet = true;
     else if (a.startsWith("--") && modelKeys.includes(a.slice(2))) opts.model = a.slice(2);
@@ -166,11 +172,11 @@ ${rows}
 
 选项:
   --<modelKey>          选择模型(任意 models.json 里的 key)
-  --model <name>        同上,可指定不在 models.json 里的别名
   --write               允许子进程改文件(默认只读)
   --resume              续上次本目录的委派线程(B 档)
   --with-context        让子进程加载主对话历史(C 档,需 CLAUDE_CODE_SESSION_ID)
   --allowed-tools "..." 自定义工具列表
+  --prompt-file <path>  把文件内容作为前置系统指令注入子进程(如 review prompt 模板)
   --json                结构化输出(供 workflow 消费)
   --help, -h            打印此帮助
 `);
@@ -203,6 +209,18 @@ function buildSpawn(opts, cwd, models) {
   args.push("--model", m.model);
   // 排除 user settings(避免主环境配置污染),认证来自继承的 shell env
   args.push("--setting-sources", "project");
+
+  // --prompt-file:把模板文件内容作为前置系统指令注入(主 token 零经手)。
+  // 用于 review 等"角色/立场指令固定"的场景——指令沉在文件里,不靠主 Claude 现拼进任务文本。
+  if (opts.promptFile) {
+    let promptText;
+    try {
+      promptText = readFileSync(opts.promptFile, "utf8");
+    } catch (e) {
+      fail(`--prompt-file 读取失败 ${opts.promptFile}: ${e.message}`);
+    }
+    args.push("--append-system-prompt", promptText);
+  }
 
   // 读写权限
   const tools = opts.allowedTools

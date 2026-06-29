@@ -4,7 +4,6 @@
 // 把同一个问题并行抛给 N 个不同模型,每个模型在自己干净的上下文里独立回答,
 // 然后把 N 份意见汇总返回给主 Claude,由主 Claude 综合。
 // 设计上不允许模型互相看到对方回答 → 避免 sycophancy / 回声室效应。
-// 想要"互相批评"的场景未来由 /gkd:debate 提供。
 //
 // 用法:
 //   node gkd-brainstorm.mjs [--models a,b,c] [--with-context] [--json] [--help] "<问题>"
@@ -84,7 +83,7 @@ ${rows}
   --help, -h       打印此帮助
 
 设计:每个模型在干净独立的上下文里答题,彼此看不到对方回答——
-故意避开 LLM 的 sycophancy / 回声室效应。要"互相批评"请等 /gkd:debate。
+故意避开 LLM 的 sycophancy / 回声室效应。
 `);
 }
 
