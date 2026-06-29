@@ -2,22 +2,20 @@
 
 <p align="right"><a href="./README.md">中文</a> · <a href="./README.en.md">English</a></p>
 
-> **GKD** 既是「**搞快点**」的拼音首字母,也是三个当下前沿开源模型的首字母 —— **G**LM · **K**imi · **D**eepseek。
+> **GKD** 是「**搞快点**」的拼音首字母,也是三个当下前沿开源模型的首字母 —— **G**LM · **K**imi · **D**eepseek。
 
-GKD 是一个 [Claude Code](https://claude.com/claude-code) plugin。它借 Claude Code 自己的工具循环(harness),起一个**以你指定的任意模型为大脑**的子进程去干活——子进程有完整的 Read/Edit/Bash 工具,在自己的上下文里读文件、思考、改代码、跑命令,只把**结果**回传给主对话。
+GKD 是一个 [Claude Code](https://claude.com/claude-code) plugin。它借 Claude Code 自己的工具循环(harness),起一个**以你指定的任意模型为大脑**的子进程去干活——子进程有完整的 Read/Edit/Bash... 工具,在自己的上下文里读文件、思考、改代码、跑命令,只把**结果**回传给主对话。
 
 两个并重的目的:
 
 - **省 token** —— 重活的开销发生在子进程,主 Claude 只付「指令 + 结果」那一点点;可降级的活交给便宜模型即可。
 - **借不同模型的视角** —— 代码、长文摘要、视觉、高难推理各有所长;换一个大脑,既能在 brainstorm / cross-review 时跳出单一模型的思维定式,也能把活交给最擅长它的那个模型。
 
-便宜不是唯一标准,合适才是。同一个任务,有时你要的是省,有时你要的是一个**不一样的脑子**。
-
 ---
 
 ## 它解决什么问题
 
-用 Claude Code 时有两件事一直别扭:一是很多活其实**不需要**最贵的旗舰模型(写样板、批量同构改写、格式/语言转换、读长文档做摘要、代码审查……),但默认全喂给同一个主模型,token 哗哗地烧;二是你被**锁死在单一模型的视角**里,想听听 GLM、Kimi、Deepseek、GPT 对同一个问题怎么看,得手动切来切去。
+用 Claude Code 时会有两个问题:一是很多活其实**不需要**最贵的旗舰模型(写样板、批量同构改写、格式/语言转换、读长文档做摘要、代码审查……),但默认全喂给同一个主模型,token 哗哗地烧;二是你被**锁死在单一模型的视角**里,想听听 GLM、Kimi、Deepseek、GPT 对同一个问题怎么看,得手动切来切去。
 
 GKD 的思路是**分包给另一个大脑**:主 Claude 给方向,真正读写跑的实活交给一个换了脑的子进程。
 
@@ -39,9 +37,9 @@ flowchart LR
 
 ---
 
-## 省了多少?(`/gkd:stats` 实拍)
+## 省了多少?(`/gkd:stats`)
 
-GKD 自带用量统计,每次委派都记一笔,随时可查省了多少:
+GKD 自带用量统计,每次委派都记一笔,随时可查省了多少,例如:
 
 ```
 GKD delegation stats                                      30d · cache 5m old
@@ -104,13 +102,13 @@ cp config/models.example.json config/models.json
 {
   "models": {
     "glm": {
-      "model": "glm-4.6",
+      "model": "glm-5.2",
       "baseUrl": "${ANTHROPIC_BASE_URL}",
       "authToken": "${ANTHROPIC_AUTH_TOKEN}",
       "description": "便宜的全能选手,承接绝大多数可降级的活。主 Claude 选模型只看这段描述。",
       "capabilities": ["coding", "agentic"],
       "avoid_for": ["视觉输入"],
-      "pricingKey": "fireworks_ai/glm-4p6"
+      "pricingKey": "fireworks_ai/glm-5p2"
     }
   }
 }
@@ -138,14 +136,14 @@ cp config/models.example.json config/models.json
 | `/gkd:review` | 只读 | 代码审查(常规缺陷 / `--adversarial` 对抗式设计审) |
 | `/gkd:brainstorm` | 只读 | 多模型**并行独立**发散,主 Claude 综合分歧与共识 |
 | `/gkd:workflow` | 视任务 | N 个 item 批量委派,各起一个子进程并行处理 |
-| `/gkd:stats` | — | 委派用量与省钱估算(上面那张图) |
+| `/gkd:stats` | — | 委派用量与省钱估算|
 
-主 Claude 会**智能补全 flag**:你只管说人话,它自己判断选哪个模型、要不要带上对话历史。当然你也可以显式指定:
+主 Claude 会**智能补全 flag**:你只需要用自然语言表达,它自己判断选哪个模型、要不要带上对话历史。当然你也可以显式指定:
 
 ```
 /gkd:do --glm 把 src/legacy/ 下所有 .js 转成 TypeScript
 /gkd:ask --gpt 这个并发设计有没有竞态问题?
-/gkd:brainstorm --models glm,gpt,kimi 我们该用乐观锁还是悲观锁?
+/gkd:brainstorm 让 glm,kimi,deepseek 一起脑暴下xxx
 ```
 
 ---

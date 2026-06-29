@@ -11,13 +11,11 @@ Two goals of equal weight:
 - **Save tokens** — the heavy lifting happens in the subprocess; the main Claude only pays for "instruction + result." Downgradeable work goes to a cheaper model.
 - **Borrow another model's perspective** — code, long-document summarization, vision, hard reasoning each have their champion. Swapping the brain lets you escape a single model's blind spots during brainstorm / cross-review, and hands each task to the model best at it.
 
-Cheap isn't the only criterion — *fit* is. For the same task, sometimes you want savings, sometimes you want **a different head**.
-
 ---
 
 ## What it solves
 
-Two things are perpetually awkward with Claude Code: first, a lot of work doesn't actually **need** the most expensive flagship model (boilerplate, bulk homogeneous rewrites, format/language conversion, summarizing long docs, code review…), yet it all gets fed to the same main model and tokens burn fast; second, you're **locked into one model's perspective** — if you want to hear how GLM, Kimi, Deepseek, or GPT each see the same problem, you have to switch by hand.
+There are two problems with Claude Code: first, a lot of work doesn't actually **need** the most expensive flagship model (boilerplate, bulk homogeneous rewrites, format/language conversion, summarizing long docs, code review…), yet it all gets fed to the same main model and tokens burn fast; second, you're **locked into one model's perspective** — if you want to hear how GLM, Kimi, Deepseek, or GPT each see the same problem, you have to switch by hand.
 
 GKD's approach is to **subcontract to another brain**: the main Claude gives direction, and the actual read/write/run work goes to a brain-swapped subprocess.
 
@@ -39,9 +37,9 @@ The key discipline: **the main Claude never reads file contents and forwards the
 
 ---
 
-## How much does it save? (`/gkd:stats`, real output)
+## How much does it save? (`/gkd:stats`)
 
-GKD ships with usage stats — every delegation is logged, so you can check your savings anytime:
+GKD ships with usage stats — every delegation is logged, so you can check your savings anytime, for example:
 
 ```
 GKD delegation stats                                      30d · cache 5m old
@@ -104,13 +102,13 @@ The template ships with three example entries — **GLM · Kimi · Deepseek** (t
 {
   "models": {
     "glm": {
-      "model": "glm-4.6",
+      "model": "glm-5.2",
       "baseUrl": "${ANTHROPIC_BASE_URL}",
       "authToken": "${ANTHROPIC_AUTH_TOKEN}",
       "description": "A cheap all-rounder; takes on the vast majority of downgradeable work. The main Claude picks a model based only on this text.",
       "capabilities": ["coding", "agentic"],
       "avoid_for": ["vision input"],
-      "pricingKey": "fireworks_ai/glm-4p6"
+      "pricingKey": "fireworks_ai/glm-5p2"
     }
   }
 }
@@ -138,14 +136,14 @@ Key points:
 | `/gkd:review` | read-only | code review (regular defects / `--adversarial` design critique) |
 | `/gkd:brainstorm` | read-only | multiple models diverge **in parallel and independently**; main Claude synthesizes agreement & disagreement |
 | `/gkd:workflow` | task-dependent | bulk-delegate N items, one parallel subprocess each |
-| `/gkd:stats` | — | delegation usage and savings estimate (the chart above) |
+| `/gkd:stats` | — | delegation usage and savings estimate |
 
-The main Claude **fills in flags intelligently** — just speak plainly and it decides which model to use and whether to bring in conversation history. You can also be explicit:
+The main Claude **fills in flags intelligently** — just express yourself in natural language and it decides which model to use and whether to bring in conversation history. You can also be explicit:
 
 ```
 /gkd:do --glm convert all .js under src/legacy/ to TypeScript
 /gkd:ask --gpt does this concurrency design have a race condition?
-/gkd:brainstorm --models glm,gpt,kimi optimistic or pessimistic locking here?
+/gkd:brainstorm have glm, kimi, deepseek brainstorm xxx together
 ```
 
 ---
