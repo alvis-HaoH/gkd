@@ -1,27 +1,31 @@
-# GKD · 工头模式委派
+# GKD · 搞快点
 
-> **G**ive the **K**ung-fu to a cheaper **D**eputy —— 让主 Claude 当工头,把可降级的脏活派给便宜模型做。
+<p align="right"><a href="./README.md">中文</a> · <a href="./README.en.md">English</a></p>
+
+> **GKD** 既是「**搞快点**」的拼音首字母,也是三个当下前沿开源模型的首字母 —— **G**LM · **K**imi · **D**eepseek。
 
 GKD 是一个 [Claude Code](https://claude.com/claude-code) plugin。它借 Claude Code 自己的工具循环(harness),起一个**以你指定的任意模型为大脑**的子进程去干活——子进程有完整的 Read/Edit/Bash 工具,在自己的上下文里读文件、思考、改代码、跑命令,只把**结果**回传给主对话。
 
-两个目的:
+两个并重的目的:
 
-- **省 token** —— 重活的开销发生在子进程,主 Claude 只付「指令 + 结果」那一点点。
-- **按任务选模型** —— 代码、长文摘要、视觉、高难推理各有所长,把活交给最合适(且最便宜)的那个。
+- **省 token** —— 重活的开销发生在子进程,主 Claude 只付「指令 + 结果」那一点点;可降级的活交给便宜模型即可。
+- **借不同模型的视角** —— 代码、长文摘要、视觉、高难推理各有所长;换一个大脑,既能在 brainstorm / cross-review 时跳出单一模型的思维定式,也能把活交给最擅长它的那个模型。
+
+便宜不是唯一标准,合适才是。同一个任务,有时你要的是省,有时你要的是一个**不一样的脑子**。
 
 ---
 
 ## 它解决什么问题
 
-用 Claude Code 时,很多活其实**不需要**最贵的旗舰模型:写样板、批量同构改写、格式/语言转换、读长文档做摘要、代码审查……这些「可降级的脏活」用便宜模型完全够用。但 Claude Code 默认把所有活都喂给同一个主模型,token 哗哗地烧。
+用 Claude Code 时有两件事一直别扭:一是很多活其实**不需要**最贵的旗舰模型(写样板、批量同构改写、格式/语言转换、读长文档做摘要、代码审查……),但默认全喂给同一个主模型,token 哗哗地烧;二是你被**锁死在单一模型的视角**里,想听听 GLM、Kimi、Deepseek、GPT 对同一个问题怎么看,得手动切来切去。
 
-GKD 的思路是**工头分包**:
+GKD 的思路是**分包给另一个大脑**:主 Claude 给方向,真正读写跑的实活交给一个换了脑的子进程。
 
 ```mermaid
 flowchart LR
-    U([你]) -->|/gkd:do 改这50个文件| Main[主 Claude<br/>opus · 工头]
+    U([你]) -->|/gkd:do 改这50个文件| Main[主 Claude<br/>调度 · 给方向]
     Main -->|只传任务+文件路径<br/>不传文件内容| RT[gkd-runtime.mjs<br/>换脑底座]
-    RT -->|spawn 独立子进程<br/>claude -p --model 便宜模型| Sub[子 agent<br/>便宜模型 · 大脑]
+    RT -->|spawn 独立子进程<br/>claude -p --model 你选的模型| Sub[子 agent<br/>GLM/Kimi/Deepseek… · 大脑]
     Sub -->|完整工具循环<br/>Read/Edit/Bash 自己干| Files[(你的代码)]
     Sub -->|只回传结果| Main
     Main -->|汇报| U
@@ -94,7 +98,7 @@ cp config/models.example.json config/models.json
 # 编辑 models.json,填你自己的端点和模型
 ```
 
-`models.json` 的结构(完整字段见 `models.example.json` 里的 `_comment`):
+模板里自带 **GLM · Kimi · Deepseek** 三个示例条目(正是 GKD 名字的由来),你按自己接入的真实端点改写即可。单个模型的结构(完整字段见 `models.example.json` 里的 `_comment`):
 
 ```json
 {
