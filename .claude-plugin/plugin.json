@@ -3,6 +3,19 @@
   "version": "0.2.0",
   "description": "任务委派 plugin。借 Claude Code 的工具循环 harness,把任务派给以其他模型为大脑的子 agent——两个目的:省主 Claude 的 token,以及按任务调度合适的模型(代码/长文/视觉/推理 各有所长)。覆盖单任务委派、batch workflow、多模型 brainstorming。",
   "author": {
-    "name": "alvis_hh"
-  }
+    "name": "alvis-HaoH",
+    "url": "https://github.com/alvis-HaoH"
+  },
+  "homepage": "https://github.com/alvis-HaoH/gkd",
+  "repository": "https://github.com/alvis-HaoH/gkd",
+  "license": "MIT",
+  "keywords": [
+    "delegation",
+    "cost-saving",
+    "token-saving",
+    "model-routing",
+    "subagent",
+    "workflow",
+    "brainstorm"
+  ]
 }

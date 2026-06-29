@@ -1,0 +1,33 @@
+{
+  "_comment": "GKD 模型注册表模板。复制本文件为同目录下的 models.json 并改成你自己的端点/认证,runtime 只读 models.json(已被 .gitignore 排除,不会误入库)。字段说明:model=发给端点的真实模型名;baseUrl=Anthropic 兼容端点(支持 ${ENV_VAR} 插值);authToken=认证(支持 ${ENV_VAR} 插值,推荐用环境变量而非明文);description=给主 Claude 看,作为选模型依据;capabilities/avoid_for=结构化能力标签;pricingKey=LiteLLM(github.com/BerriAI/litellm)价格表里的 key,/gkd:stats 用它估算成本;env=可选,注入子进程环境(值支持 ${ENV_VAR} 插值),用于按端点差异调 CLI 行为,例如网关未适配 adaptive thinking 时设 MAX_THINKING_TOKENS=0;disabled=true 时该模型被拦截。加新模型只改本文件,runtime 自动读。第一个未禁用的模型为默认。",
+  "models": {
+    "glm": {
+      "model": "<填真实模型名,如 glm-4.6>",
+      "baseUrl": "${ANTHROPIC_BASE_URL}",
+      "authToken": "${ANTHROPIC_AUTH_TOKEN}",
+      "description": "示例:综合性价比最佳的便宜模型,coding/agentic 能力接近旗舰,适合承接绝大多数可降级的脏活。按你接入的真实模型改写这段描述——主 Claude 选模型只看这里。",
+      "capabilities": ["coding", "agentic"],
+      "avoid_for": ["视觉输入"],
+      "pricingKey": "<LiteLLM 价格表里的 key,如 fireworks_ai/glm-4p6;查不到就删掉此字段,stats 只是估不出价>"
+    },
+    "vision": {
+      "model": "<填一个支持图片输入的真实模型名>",
+      "baseUrl": "${ANTHROPIC_BASE_URL}",
+      "authToken": "${ANTHROPIC_AUTH_TOKEN}",
+      "description": "示例:支持视觉输入的替补,主力模型不能读图时切到它。",
+      "capabilities": ["vision-input", "coding"],
+      "avoid_for": ["主力模型够用时没必要切过来(可能更贵)"],
+      "pricingKey": "",
+      "env": { "_comment_env": "可选。某些网关端点未适配新版 CLI 的 adaptive thinking,会 400 报错;此时设 MAX_THINKING_TOKENS 为 0 关闭 thinking。不需要就删掉整个 env。", "MAX_THINKING_TOKENS": "0" }
+    },
+    "smart": {
+      "model": "<填一个高智力模型名,如官方 Claude 或 GPT 系>",
+      "baseUrl": "${ANTHROPIC_BASE_URL}",
+      "authToken": "${ANTHROPIC_AUTH_TOKEN}",
+      "description": "示例:与旗舰同档的高智力模型,贵。只在质量 > 成本的场景用:brainstorm 发散、对抗式 review、高难推理。",
+      "capabilities": ["reasoning", "brainstorming", "cross-review"],
+      "avoid_for": ["大批量脏活(贵)"],
+      "pricingKey": ""
+    }
+  }
+}
