@@ -1,3 +1,5 @@
+<p align="center"><img src="./assets/brand/gkd-brand.png" alt="GKD — one Claude, many Clawds" width="720"></p>
+
 # GKD · 搞快点
 
 <p align="right"><a href="./README.md">中文</a> · <a href="./README.en.md">English</a></p>
