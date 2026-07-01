@@ -9,7 +9,7 @@ GKD is a [Claude Code](https://claude.com/claude-code) plugin. It borrows Claude
 Two goals of equal weight:
 
 - **Save tokens** — the heavy lifting happens in the subprocess; the main Claude only pays for "instruction + result." Downgradeable work goes to a cheaper model.
-- **Borrow another model's perspective** — code, long-document summarization, vision, hard reasoning each have their champion. Swapping the brain lets you escape a single model's blind spots during brainstorm / cross-review, and hands each task to the model best at it.
+- **Borrow another model's perspective** — code, long-document summarization, vision, hard reasoning each have their own strengths. Swapping the brain lets you avoid being steered by one model's biases during brainstorm / cross-review, and hands each task to whichever model is best at it.
 
 ---
 
