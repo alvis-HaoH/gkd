@@ -134,7 +134,7 @@ Key points:
 |---|---|---|
 | `/gkd:ask <task>` | **read-only** (Read/Grep/Glob + `git`) | ask / analyze / consult; physically cannot edit files |
 | `/gkd:do <task>` | **read-write** (+Edit/Write/Bash) | edit files / persist / execute; the command name itself is your "yes, edit" |
-| `/gkd:resume <follow-up>` | inherits last run | continue this dir's last delegation thread (read/write mode inherited) |
+| `/gkd:resume [<fuzzy desc>] <follow-up>` | inherits last run | continue a delegation thread: this dir's last run by default; or name any past / cross-dir session by fuzzy description ("that one where I edited the config") — the main Claude searches for it, read/write mode inherited |
 | `/gkd:review` | read-only | code review (regular defects / `--adversarial` design critique) |
 | `/gkd:brainstorm` | read-only | multiple models diverge **in parallel and independently**; main Claude synthesizes agreement & disagreement |
 | `/gkd:workflow` | task-dependent | bulk-delegate N items, one parallel subprocess each |
@@ -176,7 +176,7 @@ flowchart TD
 ```
 
 - **Tier A** (default): the task text already says everything; the subprocess starts from scratch — cheapest.
-- **Tier B** (`--resume`): continue this dir's last delegation thread; read/write mode is inherited.
+- **Tier B** (`--resume`): continue a delegation thread; read/write mode is inherited. This dir's last run by default; or just describe it vaguely ("that one where I edited the config") and the main Claude searches your delegation history to resume any past run by name — including cross-dir ones and the latest node of a fork chain — no need to remember session ids.
 - **Tier C** (`--with-context`): when the task back-references something like "that approach above," the subprocess **itself** forks the main conversation history from disk — the main Claude doesn't have to restate it, so main tokens are nearly free.
 
 ### 3. workflow: two-layer orchestration for bulk delegation
@@ -230,9 +230,10 @@ gkd/
 ├── commands/                # 7 slash commands
 ├── skills/gkd-delegate/     # delegation discipline (the playbook when the main Claude delegates on its own)
 ├── scripts/
-│   ├── gkd-runtime.mjs      # brain-swap core (the heart of it)
-│   ├── gkd-brainstorm.mjs   # multi-model parallel
-│   └── gkd-stats.mjs        # usage stats TUI
+│   ├── gkd-runtime.mjs         # brain-swap core (the heart of it)
+│   ├── gkd-brainstorm.mjs      # multi-model parallel
+│   ├── gkd-find-session.mjs    # delegation-history search (main Claude turns a fuzzy description into a session id)
+│   └── gkd-stats.mjs           # usage stats TUI
 ├── bin/gkd-stats            # zero-model-cost entry to view stats
 ├── config/
 │   ├── models.example.json  # model registry template (copy to models.json)

@@ -134,7 +134,7 @@ cp config/models.example.json config/models.json
 |---|---|---|
 | `/gkd:ask <任务>` | **只读**(Read/Grep/Glob + `git`) | 问 / 分析 / 咨询，主进程物理上无法改文件 |
 | `/gkd:do <任务>` | **读写**(+Edit/Write/Bash) | 改文件 / 落盘 / 执行，命令名本身就是你的「同意改」 |
-| `/gkd:resume <补充>` | 自动继承上次 | 续上次本目录的委派线程(读/写模式自动继承) |
+| `/gkd:resume [<模糊描述>] <补充>` | 自动继承上次 | 续委派线程:默认续本目录上次;也可凭「上次那个改配置的」等模糊描述点名续任意历史 / 跨目录 session(主 Claude 自动检索,读/写模式自动继承) |
 | `/gkd:review` | 只读 | 代码审查(常规缺陷 / `--adversarial` 对抗式设计审) |
 | `/gkd:brainstorm` | 只读 | 多模型**并行独立**发散，主 Claude 综合分歧与共识 |
 | `/gkd:workflow` | 视任务 | N 个 item 批量委派，各起一个子进程并行处理 |
@@ -176,7 +176,7 @@ flowchart TD
 ```
 
 - **A 档**(默认):任务文本已经写清一切，子进程从零开始，最省。
-- **B 档**(`--resume`):接着上次本目录的委派线程往下做，读/写模式自动继承。
+- **B 档**(`--resume`):接着委派线程往下做，读/写模式自动继承。默认续本目录上次;你也可以只凭模糊描述(「上次那个改配置的」)让主 Claude 检索历史委派、点名续任意一条(含跨目录、fork 链最新节点),不必记 session id。
 - **C 档**(`--with-context`):任务里有「上面那个方案」这种回指时，让子进程**自己**从磁盘 fork 主对话历史——主 Claude 不用把历史复述一遍，所以主 token 几乎免费。
 
 ### 3. workflow:批量委派的双层编排
@@ -230,9 +230,10 @@ gkd/
 ├── commands/                # 7 个 slash 命令
 ├── skills/gkd-delegate/     # 委派纪律(主 Claude 自发委派时的纲领)
 ├── scripts/
-│   ├── gkd-runtime.mjs      # 换脑底座(核心)
-│   ├── gkd-brainstorm.mjs   # 多模型并行
-│   └── gkd-stats.mjs        # 用量统计 TUI
+│   ├── gkd-runtime.mjs         # 换脑底座(核心)
+│   ├── gkd-brainstorm.mjs      # 多模型并行
+│   ├── gkd-find-session.mjs    # 委派历史检索(主 Claude 把模糊描述翻成 session id)
+│   └── gkd-stats.mjs           # 用量统计 TUI
 ├── bin/gkd-stats            # 零模型成本看 stats 的入口
 ├── config/
 │   ├── models.example.json  # 模型注册表模板(复制成 models.json 用)
