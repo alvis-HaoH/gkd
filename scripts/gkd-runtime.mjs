@@ -17,7 +17,7 @@
 //   --with-context  (C) 让子进程加载主 Claude 当前对话历史(fork,只读继承,主 token 几乎免费)
 
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, realpathSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, realpathSync, chmodSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -90,35 +90,133 @@ function findSessionCwd(sessionId) {
   return null;
 }
 
-// ── 状态文件(记录上次子进程 session-id,供 --resume 用,按 cwd 区分)──────
+// ── 委派流水 delegations.jsonl —— 单一 append-only 记录 ────────────────────
+// 每行 = 一次委派(含 session/cost/task 全部属性)。它同时充当:
+//   ① 用量流水(供 /gkd:stats)② session 索引(供 --resume 续本目录上次)③ task 检索源。
+// append-only 天然无并发 lost update:每个进程只往末尾加自己那行,不做整体 read-modify-write。
 const STATE_DIR = join(homedir(), ".claude", "gkd");
-const STATE_FILE = join(STATE_DIR, "sessions.json");
-const USAGE_FILE = join(STATE_DIR, "usage.jsonl");
+const DELEGATIONS_FILE = join(STATE_DIR, "delegations.jsonl");
+const LEGACY_USAGE_FILE = join(STATE_DIR, "usage.jsonl");   // 旧:用量流水,迁移后不再写
+const LEGACY_STATE_FILE = join(STATE_DIR, "sessions.json"); // 旧:每 cwd 最后一次 session,迁移后不再写
 
-function readState() {
-  try {
-    return JSON.parse(readFileSync(STATE_FILE, "utf8"));
-  } catch {
-    return {};
-  }
-}
-function writeLastSession(cwd, sessionId, mode) {
-  if (!sessionId) return;
-  if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
-  const state = readState();
-  state[cwd] = { sessionId, mode: mode === "write" ? "write" : "read", ts: new Date().toISOString() };
-  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+// state 目录/文件含原始任务文本等本地敏感数据,权限收紧到仅当前用户(目录 0700 / 文件 0600)。
+// 已存在的目录也 chmod 到 0700,让老用户的既有目录无感升级。
+function ensureStateDir() {
+  if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+  try { chmodSync(STATE_DIR, 0o700); } catch { /* 改不动就算了,不阻断委派 */ }
 }
 
-// 每次委派的 token 用量追加一行 JSONL,供 /gkd:stats 统计。失败不让 runtime 崩。
-function writeUsageLog(entry) {
+// 一次性迁移(幂等):把老 usage.jsonl + sessions.json 合并成 delegations.jsonl。
+// 关键:老 usage.jsonl 早期行没有 sessionId(那些字段是后来才加的),单靠它老目录续不上;
+// 必须把 sessions.json 每条(每 cwd 最后一次 session)折叠成合成 delegation 行补进去。
+// 老文件保留不删(降级安全),迁移后 runtime 只认 delegations.jsonl。
+function migrateLegacyState() {
+  if (existsSync(DELEGATIONS_FILE)) return;  // 迁移过了
+  if (!existsSync(LEGACY_USAGE_FILE) && !existsSync(LEGACY_STATE_FILE)) return;  // 全新用户,无可迁移
   try {
-    if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true });
-    appendFileSync(USAGE_FILE, JSON.stringify(entry) + "\n");
+    ensureStateDir();
+    let lines = [];
+    // ① 老 usage.jsonl 整体作为基础(原样保留,老行缺字段无妨)
+    if (existsSync(LEGACY_USAGE_FILE)) {
+      lines = readFileSync(LEGACY_USAGE_FILE, "utf8").split("\n").filter((l) => l.trim());
+    }
+    // ② sessions.json 每条折叠成合成行,让老目录的「续上次」不断
+    if (existsSync(LEGACY_STATE_FILE)) {
+      try {
+        const state = JSON.parse(readFileSync(LEGACY_STATE_FILE, "utf8"));
+        for (const [cwd, v] of Object.entries(state)) {
+          if (!v?.sessionId) continue;
+          lines.push(JSON.stringify({
+            ts: v.ts || new Date(0).toISOString(),
+            sessionId: v.sessionId,
+            task: null,
+            parentSessionId: null,
+            modelKey: null,
+            model: [],
+            mode: "clean",
+            write: v.mode === "write",
+            cwd,
+            sessionCwd: cwd,   // 旧 sessions.json 的 key 就是归属目录
+            ok: true,
+            durationMs: null,
+            usage: {},
+            _migrated: "sessions.json",
+          }));
+        }
+      } catch { /* sessions.json 损坏就跳过,不阻断迁移 */ }
+    }
+    // 原子写:先写临时文件再 rename。否则 writeFileSync 写一半被中断/并发,会留下残缺 delegations.jsonl,
+    // 而 existsSync 是"已迁移"的唯一闸门 → 残缺文件永久固化、老数据成沉默孤源。rename 保证要么完整要么不存在。
+    const tmp = `${DELEGATIONS_FILE}.${process.pid}.tmp`;
+    writeFileSync(tmp, lines.length ? lines.join("\n") + "\n" : "", { mode: 0o600 });
+    renameSync(tmp, DELEGATIONS_FILE);
   } catch (e) {
-    process.stderr.write(`[gkd] 写 usage 日志失败(忽略): ${e.message}\n`);
+    process.stderr.write(`[gkd] 迁移 state 失败(忽略,将按空历史继续): ${e.message}\n`);
   }
 }
+
+// 倒序扫 delegations.jsonl,取第一条 sessionCwd===cwd 的行 → { sessionId, write }。
+// 等价于旧 readState()[cwd];链式续接每次 append 新行,倒序自然取最新 fork。
+function findLastDelegation(cwd) {
+  if (!existsSync(DELEGATIONS_FILE)) return null;
+  try {
+    const lines = readFileSync(DELEGATIONS_FILE, "utf8").trim().split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i]) continue;
+      try {
+        const e = JSON.parse(lines[i]);
+        if (e.sessionId && e.sessionCwd === cwd) return { sessionId: e.sessionId, write: !!e.write };
+      } catch { /* 单行损坏跳过 */ }
+    }
+  } catch { /* 文件读不到跳过 */ }
+  return null;
+}
+
+// 从 delegations.jsonl 倒序找某 sessionId 最后一次委派的读写模式(供点名续 id 时恢复 mode)。
+function findSessionMode(sessionId) {
+  if (!sessionId || !existsSync(DELEGATIONS_FILE)) return null;
+  try {
+    const lines = readFileSync(DELEGATIONS_FILE, "utf8").trim().split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i]) continue;
+      try {
+        const e = JSON.parse(lines[i]);
+        if (e.sessionId === sessionId) return e.write ? "write" : "read";
+      } catch { /* 单行损坏跳过 */ }
+    }
+  } catch { /* 文件读不到跳过 */ }
+  return null;
+}
+
+// 任务摘要:空白归一化 + 按 Unicode 字符(非字节,防截断中文)截断到 120 字 + 省略号。
+// 供主 Claude 按「模糊描述」在 delegations.jsonl 里检索历史 session。含原始任务文本,本地敏感。
+function makeTaskPreview(task) {
+  const s = String(task ?? "").replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  const chars = Array.from(s);
+  return chars.length > 120 ? chars.slice(0, 120).join("") + "…" : s;
+}
+
+// 每次委派追加一行到 delegations.jsonl。失败不让 runtime 崩。
+function appendDelegation(entry) {
+  try {
+    ensureStateDir();
+    appendFileSync(DELEGATIONS_FILE, JSON.stringify(entry) + "\n");
+  } catch (e) {
+    process.stderr.write(`[gkd] 写 delegations 日志失败(忽略): ${e.message}\n`);
+    return;
+  }
+  // 权限收紧单独处理:写成功但 chmod 失败(如 iCloud/NFS/只读挂载)不该被当成"写失败",
+  // 但也不能静默——文件含原始任务文本,权限没收紧时明确告警,让用户知道可能被同机其他用户读到。
+  try {
+    chmodSync(DELEGATIONS_FILE, 0o600);
+  } catch (e) {
+    process.stderr.write(`[gkd] ⚠ 无法收紧 delegations.jsonl 权限(${e.code || e.message}):该文件含原始任务文本,当前权限下同机其他用户可能可读\n`);
+  }
+}
+
+// Claude Code sessionId 是 UUID v4 形态(8-4-4-4-12 hex)。用它闸门 --resume 的可选 id 参数。
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // ── 参数解析 ──────────────────────────────────────────────────────────
 // modelKeys:从 models.json 动态读出的合法模型 key 集合,任意 --<key> 都识别
@@ -127,6 +225,7 @@ function parseArgs(argv, modelKeys) {
     model: null,           // 由 main 在解析后兜底成默认
     write: false,
     resume: false,
+    resumeId: null,        // --resume 后跟的显式 sessionId(点名续任意历史 session)
     withContext: false,
     allowedTools: null,
     promptFile: null,      // --prompt-file:把文件内容作为前置系统指令注入子进程
@@ -141,7 +240,13 @@ function parseArgs(argv, modelKeys) {
     const a = argv[i];
     if (a === "--help" || a === "-h") opts.help = true;
     else if (a === "--write") opts.write = true;
-    else if (a === "--resume") opts.resume = true;
+    else if (a === "--resume") {
+      // --resume 后紧跟一个 UUID 形态的值 = 点名续该 sessionId;否则 = 续本目录上次。
+      // 必须用 UUID 正则闸门:命令层把任务文本作为单个 argv 传入,不闸门会把任务文本误当 id。
+      const next = argv[i + 1];
+      if (next && UUID_RE.test(next)) { opts.resumeId = next; i++; }
+      opts.resume = true;
+    }
     else if (a === "--with-context") opts.withContext = true;
     else if (a === "--allowed-tools") opts.allowedTools = argv[++i];
     else if (a === "--prompt-file") {
@@ -180,7 +285,7 @@ ${rows}
 选项:
   --<modelKey>          选择模型(任意 models.json 里的 key)
   --write               允许子进程改文件(默认只读)
-  --resume              续上次本目录的委派线程(B 档)
+  --resume [<id>]       续委派线程(B 档):不带 id=续本目录上次;带 UUID=点名续该 session(可跨目录)
   --with-context        让子进程加载主对话历史(C 档,需 CLAUDE_CODE_SESSION_ID)
   --allowed-tools "..." 自定义工具列表
   --prompt-file <path>  把文件内容作为前置系统指令注入子进程(如 review prompt 模板)
@@ -239,8 +344,16 @@ function buildSpawn(opts, cwd, models) {
   args.push("--allowed-tools", ...tools);
   args.push("--permission-mode", opts.write ? "acceptEdits" : "default");
 
+  // --with-context 与 --resume 互斥(不论带不带 id):前者续主对话、后者续委派子进程,
+  // 同传时 buildSpawn 会静默进 with-context 分支、把 --resume 吞掉,续委派意图丢失,故直接 fail。
+  if (opts.withContext && opts.resume) {
+    fail("--with-context 不能和 --resume 同时使用:要么续委派线程(--resume [<id>]),要么从主对话 fork(--with-context),二选一");
+  }
+
   // 上下文三档
-  let spawnCwd = null;  // 默认 null = 继承父进程 cwd
+  let spawnCwd = null;       // 默认 null = 继承父进程 cwd(A/B 档默认)
+  let stateCwd = cwd;        // 结束时把新 fork 的 session 记到哪个 cwd 下(默认调用 cwd)
+  let parentSessionId = null; // B 档:本次 fork 自哪个委派 session(供重建 fork 链、检索最新节点)
   if (opts.withContext) {
     // C 档:加载主 Claude 当前对话历史(fork → 只读继承,不污染主 session 文件)
     const mainSession = process.env.CLAUDE_CODE_SESSION_ID;
@@ -258,14 +371,27 @@ function buildSpawn(opts, cwd, models) {
       process.stderr.write(`[gkd] --with-context: 检测到 cwd 漂移(用户 ${cwd} → 原 session ${sessionOriginCwd}),已 override 子进程 cwd 以定位 session 文件\n`);
     }
     spawnCwd = sessionOriginCwd;
+    stateCwd = sessionOriginCwd;  // fork 出的 session 落在主对话归属目录,state/usage 的 sessionCwd 须与之一致
     args.push("--resume", mainSession, "--fork-session");
   } else if (opts.resume) {
-    // B 档:续上次本工具的委派线程
-    const last = readState()[cwd]?.sessionId;
-    if (!last) {
-      fail("--resume 找不到上次的委派线程(本目录还没委派过)");
+    // B 档:续委派线程。opts.resumeId = 点名续该 id;否则续本目录上次
+    const sid = opts.resumeId || findLastDelegation(cwd)?.sessionId;
+    if (!sid) {
+      fail("--resume 找不到上次的委派线程(本目录还没委派过)。若要点名续历史,传 --resume <sessionId>");
     }
-    args.push("--resume", last, "--fork-session");
+    // 无论点名还是续上次,都按 id 反查 jsonl 真实归属目录钉住 child cwd,
+    // 否则 child claude 会按当前 cwd 编码找 jsonl → 跨目录续必然找不到。
+    const originCwd = findSessionCwd(sid);
+    if (!originCwd) {
+      fail(`找不到 session ${sid.slice(0, 8)}... 的 jsonl(扫遍 ~/.claude/projects/*)。可能:id 复制错了、文件被手动清理、或是别的机器/用户目录里的 session。`);
+    }
+    if (originCwd !== cwd) {
+      process.stderr.write(`[gkd] --resume: session 归属目录 ${originCwd}(≠ 当前 ${cwd}),子进程将在该目录运行\n`);
+    }
+    spawnCwd = originCwd;
+    stateCwd = originCwd;  // 关键:新 fork 记到 session 真实归属目录,不污染调用 cwd 的 state
+    parentSessionId = sid; // 记下被续的 id,让 fork 链 A→B→C 可从 delegations 重建
+    args.push("--resume", sid, "--fork-session");
   }
   // A 档:什么都不加
 
@@ -274,6 +400,8 @@ function buildSpawn(opts, cwd, models) {
     args,
     envOverride: { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: authToken, ...modelEnv },
     spawnCwd,
+    stateCwd,
+    parentSessionId,
   };
 }
 
@@ -456,21 +584,33 @@ function main() {
   if (opts.help) { printHelp(models); process.exit(0); }
   if (!opts.model) opts.model = pickDefaultModel(models);
 
+  migrateLegacyState();  // 幂等:首次运行把老 usage.jsonl+sessions.json 合并成 delegations.jsonl
+
   if (!opts.task && !opts.resume) {
     fail("缺少任务文本。运行 gkd-runtime --help 查看用法。");
   }
 
-  // --resume 时,若用户没显式 --write,则从 state 继承上次会话的 mode。
-  // 显式 --write 永远胜过继承(用户的明确意图优先)。
+  // --resume 时,若用户没显式 --write,则恢复该会话的读写模式。显式 --write 永远胜过继承。
+  // 两条来源分开:点名续 id 从 delegations.jsonl 按 id 反查;续本目录上次取该 cwd 最新一条。
   if (opts.resume && !opts.write) {
-    const last = readState()[cwd];
-    if (last?.mode === "write") {
-      opts.write = true;
-      if (!opts.quiet) process.stderr.write(`[gkd] 续会话:从上次继承写模式\n`);
+    if (opts.resumeId) {
+      const m = findSessionMode(opts.resumeId);
+      if (m === "write") {
+        opts.write = true;
+        if (!opts.quiet) process.stderr.write(`[gkd] 点名续会话:从委派记录恢复写模式\n`);
+      } else if (!opts.quiet) {
+        process.stderr.write(`[gkd] 点名续会话:${m === "read" ? "恢复只读模式" : "无历史读写记录,默认只读"};需写文件请用 /gkd:do --resume ${opts.resumeId.slice(0, 8)}...\n`);
+      }
+    } else {
+      const last = findLastDelegation(cwd);
+      if (last?.write) {
+        opts.write = true;
+        if (!opts.quiet) process.stderr.write(`[gkd] 续会话:从上次继承写模式\n`);
+      }
     }
   }
 
-  const { args: claudeArgs, envOverride, spawnCwd } = buildSpawn(opts, cwd, models);
+  const { args: claudeArgs, envOverride, spawnCwd, stateCwd, parentSessionId } = buildSpawn(opts, cwd, models);
   const cli = process.env.GKD_CLAUDE_BIN || "claude";
 
   const startMs = Date.now();
@@ -497,14 +637,20 @@ function main() {
 
     const result = parsed.result ?? "";
     const modelUsed = parsed.modelUsage ? Object.keys(parsed.modelUsage) : [];
-    writeLastSession(cwd, parsed.session_id, opts.write ? "write" : "read");
-    writeUsageLog({
+    // 只追加一条 delegation 行:其 sessionCwd 字段兼任「续本目录上次」的索引(取代旧 sessions.json)。
+    appendDelegation({
       ts: new Date().toISOString(),
+      sessionId: parsed.session_id,  // 供 findSessionMode 反查 mode / findLastDelegation 续本目录上次
+      // task = 委派原始任务摘要,供模糊检索。resume 行的 opts.task 是补充指令(非原始意图),
+      // 写 null 保持语义纯净——该 session 的原始任务已记在它 spawn 那行。
+      task: opts.resume ? null : makeTaskPreview(opts.task),
+      parentSessionId,  // B 档 fork 自哪个 session(A/C 档为 null);串起 fork 链,检索时可回溯到最新节点
       modelKey: opts.model,
       model: modelUsed,
       mode: opts.withContext ? "with-context" : opts.resume ? "resume" : "clean",
       write: opts.write,
-      cwd,
+      cwd,                 // 调用时的当前目录
+      sessionCwd: stateCwd, // session 真实归属目录(跨目录续时 ≠ cwd),兼任续本目录上次的索引键
       ok: !parsed.is_error,
       durationMs: Date.now() - startMs,
       usage: parsed.modelUsage ?? {},

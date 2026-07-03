@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// gkd-stats —— 读 ~/.claude/gkd/usage.jsonl,聚合 token 用量,
+// gkd-stats —— 读 ~/.claude/gkd/delegations.jsonl,聚合 token 用量,
 // 用 LiteLLM 公开价格估算"实际花费"vs"如果都用 opus 的花费",输出节省情况。
 //
 // 用法:
@@ -15,7 +15,10 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const STATE_DIR = join(homedir(), ".claude", "gkd");
-const USAGE_FILE = join(STATE_DIR, "usage.jsonl");
+// 委派流水:优先读新的 delegations.jsonl;若 runtime 还没迁移过(该文件不存在)则回落老 usage.jsonl。
+const DELEGATIONS_FILE = join(STATE_DIR, "delegations.jsonl");
+const LEGACY_USAGE_FILE = join(STATE_DIR, "usage.jsonl");
+const USAGE_FILE = existsSync(DELEGATIONS_FILE) ? DELEGATIONS_FILE : LEGACY_USAGE_FILE;
 const PRICE_CACHE = join(STATE_DIR, "litellm_prices.json");
 const MODELS_FILE = join(__dirname, "..", "config", "models.json");
 
@@ -34,7 +37,7 @@ const PRICE_FIELDS = {
   cache_creation: "cache_creation_input_token_cost",
 };
 
-// 子进程返回的 modelUsage 字段名(camelCase,见 ~/.claude/gkd/usage.jsonl)
+// 子进程返回的 modelUsage 字段名(camelCase,见 ~/.claude/gkd/delegations.jsonl)
 const TOKEN_FIELDS = {
   input: "inputTokens",
   output: "outputTokens",
@@ -106,7 +109,7 @@ async function loadPrices(forceRefresh) {
   }
 }
 
-// ── 读 usage.jsonl ────────────────────────────────────────────────────
+// ── 读委派流水(delegations.jsonl,回落 usage.jsonl)──────────────────────
 function loadUsage(daysAgo) {
   if (!existsSync(USAGE_FILE)) return [];
   const cutoffMs = Date.now() - daysAgo * 24 * 60 * 60 * 1000;
@@ -117,6 +120,9 @@ function loadUsage(daysAgo) {
     if (!line.trim()) continue;
     try {
       const e = JSON.parse(line);
+      // 跳过迁移合成行:它们由 migrateLegacyState 从老 sessions.json 折叠而来,modelKey/usage 为空,
+      // 计入会让 calls 与 priceMissing 虚高、多出一个来历不明的 "(unknown)" 行。
+      if (e._migrated) continue;
       if (new Date(e.ts).getTime() >= cutoffMs) entries.push(e);
     } catch {
       bad++;

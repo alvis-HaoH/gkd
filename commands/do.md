@@ -16,6 +16,7 @@ $ARGUMENTS
 ## 怎么做
 
 1. **拣 flags**:识别 `--<modelKey>`(见 `${CLAUDE_PLUGIN_ROOT}/config/models.json`)、`--with-context`、`--resume`、`--json`、`--quiet`。**`--write` 由命令自动加,不用让用户重复传。**
+   - **续历史会话并写**:`/gkd:do --resume [<sessionId>] <补充>` 可续上次(或点名续某次)委派**并给写权限**(即使原会话是只读)。续接语义、sessionId 检索 SOP、UUID 误拣防范、`--with-context` 互斥等规则,统一见 `commands/resume.md`——此处不复述,避免两处漂移。
 
 2. **选模型**:用户显式指定或自然语言提名("用 GPT 改")就用之;没说就**不传**,让 runtime 用默认。
 
