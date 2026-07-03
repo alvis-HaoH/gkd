@@ -17,9 +17,9 @@
 //   --with-context  (C) 让子进程加载主 Claude 当前对话历史(fork,只读继承,主 token 几乎免费)
 
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // ── 模型注册表:从 config/models.json 读取 ───────────────────────────────
@@ -130,11 +130,13 @@ function parseArgs(argv, modelKeys) {
     withContext: false,
     allowedTools: null,
     promptFile: null,      // --prompt-file:把文件内容作为前置系统指令注入子进程
+    render: null,          // --render <kind>:对子进程 result 做结构化渲染(目前仅 "review")
     json: false,
     help: false,
     quiet: false,
     task: [],
   };
+  const RENDER_KINDS = ["review"];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") opts.help = true;
@@ -146,6 +148,11 @@ function parseArgs(argv, modelKeys) {
       const v = argv[++i];
       if (!v || v.startsWith("--")) fail("--prompt-file 需要一个文件路径参数");
       opts.promptFile = v;
+    }
+    else if (a === "--render") {
+      const v = argv[++i];
+      if (!v || !RENDER_KINDS.includes(v)) fail(`--render 需要一个渲染类型参数(当前支持: ${RENDER_KINDS.join(", ")})`);
+      opts.render = v;
     }
     else if (a === "--model") fail("--model 已废弃,请用 --<modelKey>(如 --glm),见 --help");
     else if (a === "--json") opts.json = true;
@@ -177,6 +184,7 @@ ${rows}
   --with-context        让子进程加载主对话历史(C 档,需 CLAUDE_CODE_SESSION_ID)
   --allowed-tools "..." 自定义工具列表
   --prompt-file <path>  把文件内容作为前置系统指令注入子进程(如 review prompt 模板)
+  --render review       把子进程 result(应为 JSON)渲染成干净审查报告;解析失败则原文降级
   --json                结构化输出(供 workflow 消费)
   --help, -h            打印此帮助
 `);
@@ -285,6 +293,160 @@ function childEnv(override = {}) {
   return env;
 }
 
+// ── review 结构化渲染 ─────────────────────────────────────────────────
+// 子进程被 prompt 要求"最终消息只吐一个 JSON 对象",但便宜模型常在 JSON 前后夹带独白、
+// 套 markdown 围栏,或在字符串里塞非法转义(如 \` —— JSON 只认 \" \\ \/ \b \f \n \r \u)。
+// 这里从多个候选来源提取,每个候选都先原样 parse、失败再清洗非法转义重试,校验形状后渲染。
+// 全部失败 → 原文降级(不崩,把原始 result 附回让用户自己看)。
+
+// 删掉字符串里"反斜杠后接非合法 JSON 转义字符"的反斜杠(模型误转义 markdown 反引号等常见)。
+// 边界:这只处理孤立非法反斜杠,兜不住 \u 后接非 4 位 hex、或字符串内的字面控制字符等。
+// 属尽力而为的容错——兜不住就让候选 parse 失败、最终降级原文(不崩),这是设计预期。
+function stripBadEscapes(s) {
+  return s.replace(/\\(?!["\\/bfnrtu])/g, "");
+}
+
+// 先原样 parse,失败再清洗非法转义 parse。任一成功即返回 {ok,data}。
+function tryParseJson(s) {
+  try { return { ok: true, data: JSON.parse(s) }; } catch { /* 继续 */ }
+  try { return { ok: true, data: JSON.parse(stripBadEscapes(s)) }; } catch { /* 继续 */ }
+  return { ok: false };
+}
+
+// 提取审查 JSON。候选来源:整串 → 围栏内容 → 所有顶层平衡对象(按长度降序)。
+// 关键:对每个候选先 parse 再 validateReviewShape,校验通过才采纳——否则一个语法合法但
+// 形状不符的诱饵 JSON(如模型在 recommendation 里贴的代码块)会挤掉真报告。
+// 残余风险:若诱饵本身形状也合规(模型贴了个完整合法的示例审查 JSON),按长度降序它可能
+// 先于真报告被采纳。这已达纯启发式的极限,靠 prompt 约束"别贴示例 JSON"缓解,不在此强防。
+function extractReviewJson(result) {
+  const raw = (result || "").trim();
+  if (!raw) return { ok: false, error: "result 为空" };
+
+  const candidates = [raw];
+  // ② markdown 围栏内容(```json … ``` 或 ``` … ```)
+  const fence = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) candidates.push(fence[1].trim());
+  // ③ 所有顶层平衡 {…}(按长度降序),应对独白 + JSON 混排 / 前置诱饵 JSON
+  candidates.push(...topLevelObjects(raw));
+
+  let lastShapeErr = null;
+  for (const c of candidates) {
+    const r = tryParseJson(c);
+    if (!r.ok) continue;
+    const shapeErr = validateReviewShape(r.data);
+    if (!shapeErr) return { ok: true, data: r.data };
+    lastShapeErr = shapeErr;  // 语法合法但形状不符,记下继续试下一个候选
+  }
+  return {
+    ok: false,
+    error: lastShapeErr
+      ? `提取到 JSON 但形状不符(${lastShapeErr})`
+      : "未能从 result 中提取出合法 JSON 对象",
+  };
+}
+
+// 从文本里找出所有顶层(depth 从 0 到 0)的括号平衡 {…} 子串,忽略字符串字面量内的花括号,
+// 按长度降序返回。降序让"最外层最完整"的对象优先被尝试,同时保留次长候选供回退。
+function topLevelObjects(s) {
+  const found = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== "{") continue;
+    let depth = 0, inStr = false, esc = false;
+    for (let j = i; j < s.length; j++) {
+      const ch = s[j];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === "\\") esc = true;
+        else if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') inStr = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          found.push(s.slice(i, j + 1));
+          i = j;  // 跳过这个对象内部的 { 起点,只收顶层
+          break;
+        }
+      }
+    }
+  }
+  return found.sort((a, b) => b.length - a.length);
+}
+
+// 手动校验(不引 JSON-Schema 库,与 prompts/review-output.schema.json 手动保持同步——
+// 改 schema 记得同步改这里)。校验 enum 取值,拦住模型漂移出契约的输出。
+const VERDICT_VALUES = ["correct", "incorrect", "approve", "needs-attention"];
+const PRIORITY_VALUES = ["P0", "P1", "P2", "P3"];
+
+function validateReviewShape(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return "顶层不是 JSON 对象";
+  if (typeof data.verdict !== "string" || !data.verdict.trim()) return "缺少有效 verdict";
+  if (!VERDICT_VALUES.includes(data.verdict)) return `verdict 取值非法: ${data.verdict}`;
+  if (typeof data.summary !== "string" || !data.summary.trim()) return "缺少有效 summary";
+  if (!Array.isArray(data.findings)) return "findings 不是数组";
+  for (let i = 0; i < data.findings.length; i++) {
+    const f = data.findings[i];
+    if (!f || typeof f !== "object") return `findings[${i}] 不是对象`;
+    for (const k of ["title", "file", "body"]) {
+      if (typeof f[k] !== "string" || !f[k].trim()) return `findings[${i}] 缺少有效 ${k}`;
+    }
+    if (f.priority !== undefined && !PRIORITY_VALUES.includes(f.priority)) {
+      return `findings[${i}] priority 取值非法: ${f.priority}`;
+    }
+    if (f.confidence !== undefined &&
+        (typeof f.confidence !== "number" || f.confidence < 0 || f.confidence > 1)) {
+      return `findings[${i}] confidence 须是 0~1 的数值`;
+    }
+  }
+  return null;
+}
+
+const P_RANK = { P0: 0, P1: 1, P2: 2, P3: 3 };
+
+function renderReview(data) {
+  const findings = [...data.findings];
+  // 缺陷式(带 priority)按 P0→P3 排;对抗式保留模型给的原序——模型已被要求按风险严重度排,
+  // 不能用 confidence 覆盖它(高危风险常置信度更低,重排会把它压到后面)。
+  if (findings.some((f) => f.priority)) {
+    findings.sort((a, b) => (P_RANK[a.priority] ?? 9) - (P_RANK[b.priority] ?? 9));
+  }
+
+  const out = [];
+  out.push(`## 审查报告\n`);
+
+  if (findings.length === 0) {
+    out.push("**无发现** —— 未发现值得报的问题。\n");
+  } else {
+    findings.forEach((f, idx) => {
+      const tag = f.priority ? `[${f.priority}] ` : "";
+      const loc = f.line ? `\`${f.file}:${f.line}\`` : `\`${f.file}\``;
+      out.push(`### ${idx + 1}. ${tag}${f.title}`);
+      out.push(`- 位置:${loc}`);
+      out.push(`- 问题:${f.body}`);
+      if (f.recommendation && f.recommendation.trim()) out.push(`- 建议:${f.recommendation}`);
+      if (typeof f.confidence === "number") out.push(`- 置信度:${f.confidence}`);
+      out.push("");
+    });
+  }
+
+  out.push(`**总判定:\`${data.verdict}\`** —— ${data.summary}`);
+  return out.join("\n");
+}
+
+// 渲染入口:成功 → 干净报告;失败 → 原文降级(带告警前缀)。
+// extractReviewJson 内部已做形状校验,这里 ok 即代表 data 形状合法,直接渲染。
+// 降级前缀只给用户"这不是正常报告"的信号,不塞 extracted.error 那种内部诊断术语
+// (verdict/result 等对终端用户是噪音;要诊断走 --json 或 stderr 元信息)。
+function renderReviewResult(result) {
+  const extracted = extractReviewJson(result);
+  if (!extracted.ok) {
+    return `[gkd] ⚠ 模型输出未通过结构化校验,以下为原始输出:\n\n${result}`;
+  }
+  return renderReview(extracted.data);
+}
+
 // ── 主流程 ────────────────────────────────────────────────────────────
 function main() {
   const models = loadModels();
@@ -358,7 +520,9 @@ function main() {
       }, null, 2) + "\n");
     } else {
       // 人类可读:结果 + 一行元信息(--quiet 时压制,供 brainstorm 等下游脚本干净消费 stdout)
-      process.stdout.write(result + "\n");
+      // --render review:把子进程 result(应为 JSON)渲染成干净报告;提取/校验失败则原文降级。
+      const humanOut = opts.render === "review" ? renderReviewResult(result) : result;
+      process.stdout.write(humanOut + "\n");
       if (!opts.quiet) {
         const tag = parsed.is_error ? "❌ 失败" : "✅";
         process.stderr.write(`\n[gkd] ${tag} | 实际模型: ${modelUsed.join(",") || "?"} | session: ${parsed.session_id || "?"}\n`);
@@ -368,4 +532,25 @@ function main() {
   });
 }
 
-main();
+// 仅在作为脚本直接运行时启动 main;被 import(如单测)时不自动执行。
+// 注意:plugin 常以 symlink 安装(~/.claude/skills/gkd → 源仓库),此时 process.argv[1]
+// 保留 symlink 路径,而 import.meta.url 是 ESM loader 解析后的 realpath,直接比较会失配
+// 导致 main 不跑、脚本静默哑火。故两侧都 realpath 归一后再比。
+function isRunAsScript() {
+  const invoked = process.argv[1];
+  if (!invoked) return false;
+  const self = fileURLToPath(import.meta.url);
+  try {
+    return realpathSync(invoked) === realpathSync(self);
+  } catch {
+    // realpath 失败(symlink 断裂/文件被删/跨盘等)极罕见。退化为绝对路径字符串比较:
+    // 只有归一后仍相等才判为直接运行。不无条件返回 true——否则被 import 跑单测时,
+    // 若 realpath 恰好抛错会误触发 main 去 spawn 子进程,污染测试。
+    return resolve(invoked) === resolve(self);
+  }
+}
+if (isRunAsScript()) {
+  main();
+}
+
+export { extractReviewJson, validateReviewShape, renderReview, renderReviewResult };

@@ -35,6 +35,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/gkd-runtime.mjs" \
   <用户的 --<modelKey>(若有,否则不传走默认)> \
   --allowed-tools "Read Grep Glob Bash(git:*)" \
   --prompt-file "<上面选定的模板路径>" \
+  --render review \
   "$(cat <<'__GKD_TASK_EOF__'
 审查范围 <scope,如 working-tree 或 branch(base=origin/main)>。
 <若用户给了额外关注点,粘在这里:重点关注 ...>
@@ -43,10 +44,11 @@ __GKD_TASK_EOF__
 )"
 ```
 
-审查的立场/关注面/发现标准已在 `--prompt-file` 注入的模板里,任务文本只交代范围和额外关注点。前台传 `timeout: 600000`;后台用 `run_in_background: true`,报 task_id 给用户,收到 `<task-notification>` 后 Read `.output`。
+审查的立场/关注面/发现标准已在 `--prompt-file` 注入的模板里,任务文本只交代范围和额外关注点。`--render review` 让 runtime 把子进程返回的结构化 JSON 渲染成干净报告(模板已要求子进程只吐 JSON,过程独白被挡在输出之外)。前台传 `timeout: 600000`;后台用 `run_in_background: true`,报 task_id 给用户,收到 `<task-notification>` 后 Read `.output`。
 
 ## 输出处理
 
-- 把 runtime stdout(审查报告)**逐字**返回用户,不概括、不重写、不加评论。
-- 元信息在 stderr,可省略,**除非 `❌ 失败`**——那时把 result 错误原文如实告知用户。
+**stdout 契约:runtime 的 stdout 就是给用户的最终产物,你是纯管道——逐字返回,不概括、不重写、不清洗、不根据它自行重建一份审查报告。** 无论 stdout 是渲染好的干净报告(`## 审查报告` + 分条发现 + 总判定),还是 `[gkd] ⚠` 开头的降级提示(模型没吐合法 JSON 时的原文兜底),都照此逐字回传模型的最终判断，中间过程无需逐字返回。
+
+- 元信息在 stderr,可省略,**除非 `❌ 失败`**——那时把错误原文如实告知用户。
 - 用户 review 后说"帮我修",那时再用 `/gkd:do`;`/gkd:review` 本身永不修改。

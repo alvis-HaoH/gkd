@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "GKD review 结构化输出契约(单套双词表:缺陷式与对抗式共用)。子进程的最终消息必须是且仅是一个符合此结构的 JSON 对象。注:此文件用途是内嵌进 review prompt 模板 + 文档参考;runtime 不加载它,校验由 scripts/gkd-runtime.mjs 的 validateReviewShape 手动实现——改本 schema 请同步改那里。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "summary", "findings"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "description": "总判定。缺陷式用 correct / incorrect;对抗式用 approve / needs-attention。",
+      "enum": ["correct", "incorrect", "approve", "needs-attention"]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "一句话总判定理由,ship / no-ship 口吻,不要中立复述。"
+    },
+    "findings": {
+      "type": "array",
+      "description": "所有值得报的发现。没有发现就给空数组,不要硬凑。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "file", "body"],
+        "properties": {
+          "priority": {
+            "type": "string",
+            "description": "缺陷式必填:P0 阻断/P1 紧急/P2 正常/P3 锦上添花。对抗式可省。",
+            "enum": ["P0", "P1", "P2", "P3"]
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "对抗式必填:这条发现的置信度(0~1),诚实标注。缺陷式可省。"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "description": "一句话说清这条缺陷/风险是什么。"
+          },
+          "file": {
+            "type": "string",
+            "minLength": 1,
+            "description": "受影响文件的仓库相对路径。"
+          },
+          "line": {
+            "type": "string",
+            "description": "行号或范围,如 42 或 42-50。拿不准可留空。"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "description": "为什么是问题 + 触发条件(什么输入/环境/时序下才出问题)。依赖推断处明说是推断。"
+          },
+          "recommendation": {
+            "type": "string",
+            "description": "具体改什么能降低风险。工程师能直接上手的粒度。"
+          }
+        }
+      }
+    }
+  }
+}
