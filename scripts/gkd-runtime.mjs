@@ -26,6 +26,22 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MODELS_FILE = join(__dirname, "..", "config", "models.json");
 
+// ── 传给官方 claude CLI 的 flag 名,集中一处 ──
+// 换脑靠 spawn `claude -p --model` 子进程,这些字符串必须和当前 claude CLI 认的 flag 一字不差。
+// 官方升级若改了某个 flag 名,只改这里一行即可,不必翻遍 buildSpawn。
+// (注:用户在 gkd 命令行敲的 flag 如 --glm/--with-context/--resume 由 parseArgs 处理,不在此表。)
+const CLI_FLAGS = {
+  print: "-p",                       // headless 非交互调用
+  model: "--model",                  // 换脑唯一可靠开关
+  settingSources: "--setting-sources", // 排除 user settings,认证走继承的 shell env
+  appendSystemPrompt: "--append-system-prompt", // 前置系统指令(--prompt-file 内容)
+  allowedTools: "--allowed-tools",   // 读/写权限边界
+  permissionMode: "--permission-mode",
+  resume: "--resume",                // 续 session(委派线程 或 主对话 fork)
+  forkSession: "--fork-session",     // 只读继承,不污染源 session
+  outputFormat: "--output-format",   // json,供解析
+};
+
 function pickDefaultModel(models) {
   // 取第一个未禁用的 key 当默认
   for (const [k, v] of Object.entries(models)) {
@@ -317,11 +333,11 @@ function buildSpawn(opts, cwd, models) {
     for (const [k, v] of Object.entries(m.env)) modelEnv[k] = expandEnv(String(v));
   }
 
-  const args = ["-p", opts.task];
+  const args = [CLI_FLAGS.print, opts.task];
   // 换脑:唯一可靠开关
-  args.push("--model", m.model);
+  args.push(CLI_FLAGS.model, m.model);
   // 排除 user settings(避免主环境配置污染),认证来自继承的 shell env
-  args.push("--setting-sources", "project");
+  args.push(CLI_FLAGS.settingSources, "project");
 
   // --prompt-file:把模板文件内容作为前置系统指令注入(主 token 零经手)。
   // 用于 review 等"角色/立场指令固定"的场景——指令沉在文件里,不靠主 Claude 现拼进任务文本。
@@ -332,7 +348,7 @@ function buildSpawn(opts, cwd, models) {
     } catch (e) {
       fail(`--prompt-file 读取失败 ${opts.promptFile}: ${e.message}`);
     }
-    args.push("--append-system-prompt", promptText);
+    args.push(CLI_FLAGS.appendSystemPrompt, promptText);
   }
 
   // 读写权限
@@ -341,8 +357,8 @@ function buildSpawn(opts, cwd, models) {
     : opts.write
       ? ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
       : ["Read", "Grep", "Glob"];
-  args.push("--allowed-tools", ...tools);
-  args.push("--permission-mode", opts.write ? "acceptEdits" : "default");
+  args.push(CLI_FLAGS.allowedTools, ...tools);
+  args.push(CLI_FLAGS.permissionMode, opts.write ? "acceptEdits" : "default");
 
   // --with-context 与 --resume 互斥(不论带不带 id):前者续主对话、后者续委派子进程,
   // 同传时 buildSpawn 会静默进 with-context 分支、把 --resume 吞掉,续委派意图丢失,故直接 fail。
@@ -372,7 +388,7 @@ function buildSpawn(opts, cwd, models) {
     }
     spawnCwd = sessionOriginCwd;
     stateCwd = sessionOriginCwd;  // fork 出的 session 落在主对话归属目录,state/usage 的 sessionCwd 须与之一致
-    args.push("--resume", mainSession, "--fork-session");
+    args.push(CLI_FLAGS.resume, mainSession, CLI_FLAGS.forkSession);
   } else if (opts.resume) {
     // B 档:续委派线程。opts.resumeId = 点名续该 id;否则续本目录上次
     const sid = opts.resumeId || findLastDelegation(cwd)?.sessionId;
@@ -391,11 +407,11 @@ function buildSpawn(opts, cwd, models) {
     spawnCwd = originCwd;
     stateCwd = originCwd;  // 关键:新 fork 记到 session 真实归属目录,不污染调用 cwd 的 state
     parentSessionId = sid; // 记下被续的 id,让 fork 链 A→B→C 可从 delegations 重建
-    args.push("--resume", sid, "--fork-session");
+    args.push(CLI_FLAGS.resume, sid, CLI_FLAGS.forkSession);
   }
   // A 档:什么都不加
 
-  args.push("--output-format", "json");
+  args.push(CLI_FLAGS.outputFormat, "json");
   return {
     args,
     envOverride: { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: authToken, ...modelEnv },
