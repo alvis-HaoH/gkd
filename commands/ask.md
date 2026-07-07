@@ -17,7 +17,7 @@ $ARGUMENTS
 
 1. **拣 flags**:识别 `--<modelKey>`(见 `${CLAUDE_PLUGIN_ROOT}/config/models.json`)、`--with-context`、`--resume`、`--json`、`--quiet`。**忽略 `--write`**——ask 只读,用户若需要修改就提醒他改用 `/gkd:do`。
 
-2. **选模型**:用户显式指定或自然语言提名("用 GPT 看看")就用之;没说就**不传**,让 runtime 用默认。本机装了 codex CLI 时 `--codex` 可用(走 codex harness、GPT 原生工具循环,不是又一个便宜模型;选它的判据见 `config/model-routing.md`)。**codex 不支持 `--with-context`**——若同时命中"要 codex"和"要主对话上下文",提醒用户二选一(或改用 Claude 系模型)。
+2. **选模型**:用户显式指定或自然语言提名("用 GPT 看看")就用之;没说就**不传**,让 runtime 用默认。本机装了 codex CLI 时 `--codex` 可用(走 codex harness、GPT 原生工具循环,不是又一个便宜模型;选它的判据见 `config/model-routing.md`)。**codex 也支持 `--with-context`**,首次会把当前对话导入成 codex thread(约 1-2s)。注意:codex 会把主对话历史外发给 OpenAI(跨厂商),与 Claude 系不同;主对话含敏感内容时,命中"codex + --with-context"宜用 `AskUserQuestion` 跟用户确认一次。
 
 3. **`--with-context` 自己判断**:任务若回指了主对话里才有、任务文本没写清的信息(指代某个之前讨论的方案/实体),就加 `--with-context` 把主对话 fork 给子进程;任务完全自洽就不加;**拿不准就用 `AskUserQuestion` 问用户**(选项:带上对话历史 / 干净委派)。
 

@@ -14,13 +14,15 @@
 // 上下文三档:
 //   (默认 A) 干净委派:不带任何历史
 //   --resume        (B) 续上次本工具的委派线程
-//   --with-context  (C) 让子进程加载主 Claude 当前对话历史(fork,只读继承,主 token 几乎免费)
+//   --with-context  (C) 让子进程加载主 Claude 当前对话历史(claude:fork,只读继承,主 token 几乎免费;
+//                       codex:首次把当前对话导入成 codex thread 再续,约 1-2s)
 
 import { spawn, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, realpathSync, chmodSync, renameSync, unlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { importClaudeSessionToCodex } from "./gkd-codex-import.mjs";
 
 // ── 模型注册表:从 config/models.json 读取 ───────────────────────────────
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -82,9 +84,8 @@ const CODEX_DEFAULT_ENTRY = {
   harness: "codex",
   model: null,                 // null = 用本机 ~/.codex/config.toml 的默认模型
   // 不写死 bin:让 resolveBin 走 GKD_CODEX_BIN env 兜底 → "codex",这样 env 覆盖对探测也生效。
-  description: "OpenAI Codex(本机已登录 CLI)—— 原生 harness 驱动 GPT,agentic 改代码强;适合要 GPT 视角、或独立于 Claude harness 的第二意见。走订阅额度,不计入 token 成本估算。",
-  capabilities: ["coding", "agentic", "reasoning"],
-  avoid_for: ["视觉输入未验证", "需要 --with-context 继承主对话的场景"],
+  description: "OpenAI Codex(本机已登录 CLI)—— 原生 harness 驱动 GPT,agentic 改代码强;适合要 GPT 视角、或独立于 Claude harness 的第二意见。走订阅额度,不计入 token 成本估算。支持 --with-context(首次会把当前对话导入成 codex thread,约 1-2s)。",
+  capabilities: ["coding", "agentic", "reasoning", "vision-input"],
   needsProxy: true,            // codex 走公网、需要代理 → 保留用户环境的代理变量
   autoDetect: true,            // 本机没装 codex CLI 时自动标 disabled
 };
@@ -148,7 +149,10 @@ function loadModels() {
 // 所以 spawn 子进程时若直接继承漂移后的 cwd,claude --resume <id> 会按当前 cwd 编码找,找不到。
 // 这里扫所有 projects 目录定位 jsonl,读首行的 cwd 字段,返回原始启动 cwd —— spawn 时把 child 的
 // cwd override 成它,child claude 才能解析到正确的项目目录。
-function findSessionCwd(sessionId) {
+// 扫盘定位 session jsonl,返回 { cwd, jsonlPath }:cwd 是从 jsonl 首条带 cwd 的记录读到的原始
+// 启动目录(用于钉住 child cwd),jsonlPath 是文件本身(codex C 档 import 需要把它交给 app-server)。
+// 找不到返回 null。findSessionCwd 基于它实现,两者共用同一份扫盘逻辑。
+function findSessionJsonl(sessionId) {
   if (!sessionId) return null;
   const projectsDir = join(homedir(), ".claude", "projects");
   if (!existsSync(projectsDir)) return null;
@@ -170,12 +174,16 @@ function findSessionCwd(sessionId) {
         if (!ln) continue;
         try {
           const obj = JSON.parse(ln);
-          if (typeof obj?.cwd === "string" && obj.cwd) return obj.cwd;
+          if (typeof obj?.cwd === "string" && obj.cwd) return { cwd: obj.cwd, jsonlPath };
         } catch { /* 单行损坏跳过 */ }
       }
     } catch { /* 文件读不到跳过 */ }
   }
   return null;
+}
+
+function findSessionCwd(sessionId) {
+  return findSessionJsonl(sessionId)?.cwd ?? null;
 }
 
 // ── 委派流水 delegations.jsonl —— 单一 append-only 记录 ────────────────────
@@ -429,7 +437,8 @@ ${rows}
 // 缺省 harness = "claude"(现状:spawn claude -p 换 BASE_URL);harness=="codex" 走 buildCodexSpawn。
 // 两个构造器返回统一形状,供 main() 无差别 spawn:
 //   { cli, args, envOverride, spawnCwd, stateCwd, parentSessionId, harness, outFile? }
-function buildSpawn(opts, cwd, models) {
+// async:codex C 档要 await 一次性 import。claude 分支同步,但 async 函数里直接 return 同步值无妨。
+async function buildSpawn(opts, cwd, models) {
   const m = models[opts.model];
   if (!m) {
     fail(`未知模型别名: ${opts.model}。可用: ${Object.keys(models).join(", ")}`);
@@ -447,24 +456,54 @@ function buildSpawn(opts, cwd, models) {
 //   · session_id / usage 从 --json 的 JSONL 事件流里取(main 解析)
 //   · 读写靠 sandbox 三档(-s),不是 allowed-tools
 //   · resume 走 `codex exec resume <id>`,该子命令不接受 -s/-C(见下注释)
-//   · C 档 --with-context 禁用(需 app-server import,属阶段二)
-function buildCodexSpawn(opts, cwd, m) {
-  // C 档不可移植:codex 读不了 Claude 的 ~/.claude/projects/*.jsonl。明确拦截,别静默降级。
-  if (opts.withContext) {
-    fail("委派给 codex 暂不支持 --with-context(继承主对话历史):codex 侧需 app-server import,属阶段二。请去掉 --with-context,或改用 Claude 系模型委派。");
-  }
-
+//   · C 档 --with-context:先把主对话 jsonl 导入成 codex thread(一次性 app-server import),
+//     再走和 B 档点名续接完全相同的 `codex exec resume <thread_id>` 路径。故本函数是 async。
+async function buildCodexSpawn(opts, cwd, m) {
   const outFile = join(tmpdir(), `gkd-codex-${process.pid}-${Date.now()}.txt`);
   const args = [CODEX_SUBCOMMANDS.exec];
 
-  // 上下文档:A(默认新起)/ B(--resume 续 codex thread)。C 已在上面拦截。
+  // 上下文档:A(默认新起)/ B(--resume 续 codex thread)/ C(--with-context 导入主对话再续)。
+  // B 和 C 都归到「续某个 codex thread」这条路径(resuming),差别只在 thread_id 从哪来:
+  //   B 点名 → opts.resumeId;B 续上次 → delegations 里本目录最近一条;C → 导入主对话得到的新 thread。
   let parentSessionId = null;
-  let stateCwd = cwd;   // 新委派记账到调用目录;点名续接改记原 thread 的归属目录(见下)
-  const resuming = opts.resume;
+  let stateCwd = cwd;   // 新委派记账到调用目录;续接改记原 thread 的归属目录(见下)
+  const resuming = opts.resume || opts.withContext;
   if (resuming) {
     // codex 的 session 存 ~/.codex/sessions,按 thread_id 续。
     args.push(CODEX_SUBCOMMANDS.resume);
-    if (opts.resumeId) {
+    if (opts.withContext) {
+      // C 档:导入主 Claude 当前对话历史成 codex thread,再续它。
+      const mainSession = process.env.CLAUDE_CODE_SESSION_ID;
+      if (!mainSession) {
+        fail("--with-context 需要主对话 session-id,但未找到 CLAUDE_CODE_SESSION_ID");
+      }
+      // 定位主对话 jsonl:扫盘拿 { cwd: originCwd, jsonlPath }。用户会话期间可能 cd 漂移过,
+      // jsonl 仍在启动 cwd 那一档。import 时把 cwd 传 originCwd(与 claude 分支 spawnCwd=originCwd
+      // 对齐),让导入 thread 的工作目录 = 历史发生处,后续 resume 的 cwd 才和历史里的文件路径一致。
+      const found = findSessionJsonl(mainSession);
+      if (!found) {
+        fail(`--with-context 找不到主 session ${mainSession.slice(0, 8)}... 的 jsonl 文件(扫遍 ~/.claude/projects/*)。可能 session 还没落盘,或文件被清理了。`);
+      }
+      const originCwd = found.cwd;
+      if (!opts.quiet) {
+        process.stderr.write(`[gkd] --with-context: 正在把主对话导入 codex thread(约 1-2s)…\n`);
+      }
+      let importedThreadId;
+      try {
+        importedThreadId = await importClaudeSessionToCodex(found.jsonlPath, originCwd, {
+          bin: resolveBin(m),
+          quiet: opts.quiet,
+        });
+      } catch (e) {
+        // 导入失败不静默降级成 A 档(那会让用户以为继承了上下文其实没有),直接 fail 带诊断。
+        fail(`--with-context 导入主对话到 codex 失败:${e.message}`);
+      }
+      args.push(importedThreadId);
+      // parentSessionId 保持 null(与 claude 分支 C 档一致):不把主 Claude 的 session-id 混进
+      // codex 的 fork 链字段。C 档 fork 链天然不参与回溯(imported thread 不留 delegations 档),
+      // 续本目录上次仍靠 sessionCwd 索引可用。
+      stateCwd = originCwd;  // fork 出的委派记到主对话归属目录,与 claude C 档语义一致
+    } else if (opts.resumeId) {
       parentSessionId = opts.resumeId;
       args.push(opts.resumeId);
       // 关键:点名续接的 thread 真实 cwd 从原 thread 继承(codex resume 不接受 -C),
@@ -597,11 +636,7 @@ function buildClaudeSpawn(opts, cwd, m) {
   args.push(CLI_FLAGS.allowedTools, ...tools);
   args.push(CLI_FLAGS.permissionMode, opts.write ? "acceptEdits" : "default");
 
-  // --with-context 与 --resume 互斥(不论带不带 id):前者续主对话、后者续委派子进程,
-  // 同传时 buildSpawn 会静默进 with-context 分支、把 --resume 吞掉,续委派意图丢失,故直接 fail。
-  if (opts.withContext && opts.resume) {
-    fail("--with-context 不能和 --resume 同时使用:要么续委派线程(--resume [<id>]),要么从主对话 fork(--with-context),二选一");
-  }
+  // (--with-context 与 --resume 互斥的校验已上提到 main(),claude/codex 共用一处。)
 
   // 上下文三档
   let spawnCwd = null;       // 默认 null = 继承父进程 cwd(A/B 档默认)
@@ -839,7 +874,8 @@ function renderReviewResult(result) {
 }
 
 // ── 主流程 ────────────────────────────────────────────────────────────
-function main() {
+// async:codex C 档在 buildSpawn 里要 await 一次性 import。
+async function main() {
   const models = loadModels();
   const opts = parseArgs(process.argv.slice(2), Object.keys(models));
   const cwd = process.cwd();
@@ -851,6 +887,13 @@ function main() {
 
   if (!opts.task && !opts.resume) {
     fail("缺少任务文本。运行 gkd-runtime --help 查看用法。");
+  }
+
+  // --with-context 与 --resume 互斥(不论带不带 id):前者续主对话、后者续委派子进程。
+  // claude/codex 共用一处校验,且必须在下面的 resume harness 校验/写模式恢复之前——否则同传
+  // 两者时可能先报"找不到上次委派"而非互斥错误,对用户毫无指向性。
+  if (opts.withContext && opts.resume) {
+    fail("--with-context 不能和 --resume 同时使用:要么续委派线程(--resume [<id>]),要么从主对话 fork(--with-context),二选一");
   }
 
   // 当前所选模型的 harness(缺省 claude)。resume 续接必须按它过滤上次委派记录:
@@ -890,7 +933,7 @@ function main() {
     }
   }
 
-  const { cli, args: childArgs, envOverride, spawnCwd, stateCwd, parentSessionId, harness, outFile, needsProxy } = buildSpawn(opts, cwd, models);
+  const { cli, args: childArgs, envOverride, spawnCwd, stateCwd, parentSessionId, harness, outFile, needsProxy } = await buildSpawn(opts, cwd, models);
 
   const startMs = Date.now();
   const child = spawn(cli, childArgs, {
@@ -1074,7 +1117,7 @@ function isRunAsScript() {
   }
 }
 if (isRunAsScript()) {
-  main();
+  main().catch((e) => fail(e?.stack || e?.message || String(e)));
 }
 
 export { extractReviewJson, validateReviewShape, renderReview, renderReviewResult };

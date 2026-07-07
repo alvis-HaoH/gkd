@@ -13,9 +13,8 @@
     "codex": {
       "harness": "codex",
       "model": null,
-      "description": "OpenAI Codex(本机已登录 CLI)—— 另一套 harness,GPT 在自家工具循环里干活,agentic 改代码强;适合要 GPT 视角、或独立于 Claude harness 的第二意见。走订阅额度,不计入 token 成本估算。不支持 --with-context。",
-      "capabilities": ["coding", "agentic", "reasoning"],
-      "avoid_for": ["视觉输入未验证", "需要 --with-context 继承主对话的场景"],
+      "description": "OpenAI Codex(本机已登录 CLI)—— 另一套 harness,GPT 在自家工具循环里干活,agentic 改代码强;适合要 GPT 视角、或独立于 Claude harness 的第二意见。走订阅额度,不计入 token 成本估算。支持 --with-context(首次会把当前对话导入成 codex thread,约 1-2s;会把主对话历史跨厂商外发给 OpenAI)。",
+      "capabilities": ["coding", "agentic", "reasoning", "vision-input"],
       "needsProxy": true,
       "autoDetect": true
     },
