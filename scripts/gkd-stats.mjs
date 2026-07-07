@@ -271,7 +271,7 @@ const ORANGE = 173;
 //   gpt  → 139 (mauve #AF87AF 淡紫)
 //   kimi → 144 (olive #AFAF87 橄榄)
 //   兜底 → 244 (warm gray 暖灰)
-const MODEL_COLORS = { glm: 109, gpt: 139, kimi: 144 };
+const MODEL_COLORS = { glm: 109, gpt: 139, kimi: 144, codex: 108 };
 const colorOfModel = (key) => MODEL_COLORS[key] ?? 244;
 
 // padEnd/padStart 对带 ANSI escape 的字符串会按 byte 长度算,造成对齐错位。

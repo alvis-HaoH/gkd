@@ -1,5 +1,5 @@
 {
-  "_comment": "GKD 模型注册表模板。复制本文件为同目录下的 models.json 并改成你自己的端点/认证,runtime 只读 models.json(已被 .gitignore 排除,不会误入库)。下面的 glm/kimi/deepseek 是示例(也正是 GKD 名字的由来:GLM·Kimi·Deepseek),按你实际接入的模型与端点改写。字段说明:model=发给端点的真实模型名;baseUrl=Anthropic 兼容端点(支持 ${ENV_VAR} 插值);authToken=认证(支持 ${ENV_VAR} 插值,推荐用环境变量而非明文);description=给主 Claude 看,作为选模型依据;capabilities/avoid_for=结构化能力标签;pricingKey=LiteLLM(github.com/BerriAI/litellm)价格表里的 key,/gkd:stats 用它估算成本;env=可选,注入子进程环境(值支持 ${ENV_VAR} 插值),用于按端点差异调 CLI 行为,例如网关未适配 adaptive thinking 时设 MAX_THINKING_TOKENS=0;disabled=true 时该模型被拦截。加新模型只改本文件,runtime 自动读。第一个未禁用的模型为默认。",
+  "_comment": "GKD 模型注册表模板。复制本文件为同目录下的 models.json 并改成你自己的端点/认证,runtime 只读 models.json(已被 .gitignore 排除,不会误入库)。下面的 glm/kimi/deepseek 是示例(也正是 GKD 名字的由来:GLM·Kimi·Deepseek),按你实际接入的模型与端点改写。字段说明:harness=可选,默认 'claude'(spawn claude -p 换端点);设 'codex' 则委派给本机 codex CLI(另一套 harness,见下方 codex 条目);model=发给端点的真实模型名(codex 可设 null 用其本机默认);baseUrl=Anthropic 兼容端点(支持 ${ENV_VAR} 插值;codex 不需要);authToken=认证(支持 ${ENV_VAR} 插值,推荐用环境变量而非明文;codex 用本机登录态不需要);description=给主 Claude 看,作为选模型依据;capabilities/avoid_for=结构化能力标签;pricingKey=LiteLLM(github.com/BerriAI/litellm)价格表里的 key,/gkd:stats 用它估算成本(codex 走订阅额度无此键,不计成本);env=可选,注入子进程环境(值支持 ${ENV_VAR} 插值),用于按端点差异调 CLI 行为,例如某端点未适配 adaptive thinking 时设 MAX_THINKING_TOKENS=0;needsProxy=可选布尔,默认 false(清掉子进程的 HTTP(S)_PROXY 等代理变量——某些端点走系统/企业代理会被拦截或劫持,直连更稳);走公网、确实要代理才能连通的端点(如 codex)设 true 保留你环境里的代理变量;autoDetect=可选布尔,true 时本机没装对应 CLI 就把该条目标 disabled(用于 codex 等依赖本机 CLI 的 harness);bin=可选,该 harness 的可执行名(默认 codex/claude);disabled=true 时该模型被拦截。加新模型只改本文件,runtime 自动读。第一个未禁用的模型为默认。",
   "models": {
     "glm": {
       "model": "glm-5.2",
@@ -9,6 +9,15 @@
       "capabilities": ["coding", "agentic", "frontend-design"],
       "avoid_for": ["视觉输入"],
       "pricingKey": "fireworks_ai/glm-5p2"
+    },
+    "codex": {
+      "harness": "codex",
+      "model": null,
+      "description": "OpenAI Codex(本机已登录 CLI)—— 另一套 harness,GPT 在自家工具循环里干活,agentic 改代码强;适合要 GPT 视角、或独立于 Claude harness 的第二意见。走订阅额度,不计入 token 成本估算。不支持 --with-context。",
+      "capabilities": ["coding", "agentic", "reasoning"],
+      "avoid_for": ["视觉输入未验证", "需要 --with-context 继承主对话的场景"],
+      "needsProxy": true,
+      "autoDetect": true
     },
     "kimi": {
       "model": "kimi-k2.6",

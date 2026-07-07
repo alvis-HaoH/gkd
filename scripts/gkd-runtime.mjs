@@ -16,9 +16,9 @@
 //   --resume        (B) 续上次本工具的委派线程
 //   --with-context  (C) 让子进程加载主 Claude 当前对话历史(fork,只读继承,主 token 几乎免费)
 
-import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, realpathSync, chmodSync, renameSync } from "node:fs";
-import { homedir } from "node:os";
+import { spawn, spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, realpathSync, chmodSync, renameSync, unlinkSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -41,6 +41,60 @@ const CLI_FLAGS = {
   forkSession: "--fork-session",     // 只读继承,不污染源 session
   outputFormat: "--output-format",   // json,供解析
 };
+
+// ── 传给官方 codex CLI 的参数名,集中一处(同 CLI_FLAGS 的隔离意图)──
+// codex 是另一套 harness(不是模型):spawn `codex exec` 子进程,GPT 在自家工具循环里干活。
+// 这些字符串必须和当前 codex CLI(实测 codex-cli 0.136.0)认的一字不差,官方改参数只改这里。
+// 子命令(exec/resume)和 flag(-m/-s/…)分两张表:前者是命令链、后者是选项,语义不同,别混。
+const CODEX_SUBCOMMANDS = {
+  exec: "exec",                      // 非交互子命令:`codex exec <task>`
+  resume: "resume",                  // `codex exec resume <id>` 续 thread(注:不接受 -s/-C)
+};
+const CODEX_FLAGS = {
+  model: "-m",                       // 指定模型(缺省用本机 config.toml 默认)
+  sandbox: "-s",                     // read-only / workspace-write / danger-full-access
+  cd: "-C",                          // 工作根目录(等价 claude 的 spawnCwd)
+  skipGitCheck: "--skip-git-repo-check", // 允许非 git 目录运行(对齐 claude 的无所谓语义)
+  json: "--json",                    // 事件流以 JSONL 打到 stdout(取 thread_id / usage)
+  outputLast: "-o",                  // 最终消息写入指定文件(等价 claude 的 result)
+  config: "-c",                      // 覆盖 config.toml 的键(如 model_reasoning_effort、sandbox_mode)
+};
+
+// 探测本机某个 CLI 是否可用(能跑 `<bin> --version` 且退出码 0)。惰性缓存到 bin 维度。
+// 用于 harness 条目的 autoDetect:配置里声明了 harness 但本机没装对应 CLI 时,把条目标 disabled。
+const _binAvailable = new Map();
+function detectBin(bin) {
+  if (_binAvailable.has(bin)) return _binAvailable.get(bin);
+  let ok = false;
+  try {
+    const r = spawnSync(bin, ["--version"], { stdio: ["ignore", "ignore", "ignore"], timeout: 5000 });
+    ok = r.status === 0;
+  } catch { ok = false; }
+  _binAvailable.set(bin, ok);
+  return ok;
+}
+
+// codex 的默认条目模板 —— 仅当用户的 models.json 没有 codex 条目、但本机装了 codex 时,
+// 作为"开箱即用"的兜底注入(等价于把 models.example.json 的 codex 示例条目内置一份)。
+// 用户在 models.json 里显式配了 codex 就以用户为准,这个模板不参与。
+// 它是"缺省模板"而非"唯一真相":描述/能力/needsProxy 都可被用户配置覆盖。
+const CODEX_DEFAULT_ENTRY = {
+  harness: "codex",
+  model: null,                 // null = 用本机 ~/.codex/config.toml 的默认模型
+  // 不写死 bin:让 resolveBin 走 GKD_CODEX_BIN env 兜底 → "codex",这样 env 覆盖对探测也生效。
+  description: "OpenAI Codex(本机已登录 CLI)—— 原生 harness 驱动 GPT,agentic 改代码强;适合要 GPT 视角、或独立于 Claude harness 的第二意见。走订阅额度,不计入 token 成本估算。",
+  capabilities: ["coding", "agentic", "reasoning"],
+  avoid_for: ["视觉输入未验证", "需要 --with-context 继承主对话的场景"],
+  needsProxy: true,            // codex 走公网、需要代理 → 保留用户环境的代理变量
+  autoDetect: true,            // 本机没装 codex CLI 时自动标 disabled
+};
+
+// 解析 harness 条目的实际调用 bin:条目 bin 字段 > 环境变量兜底 > harness 默认名。
+function resolveBin(m) {
+  if (m.bin) return m.bin;
+  if (m.harness === "codex") return process.env.GKD_CODEX_BIN || "codex";
+  return process.env.GKD_CLAUDE_BIN || "claude";
+}
 
 function pickDefaultModel(models) {
   // 取第一个未禁用的 key 当默认
@@ -67,7 +121,25 @@ function loadModels() {
   if (!raw.models || typeof raw.models !== "object") {
     fail(`${MODELS_FILE} 缺少 models 字段`);
   }
-  return raw.models;
+  const models = raw.models;
+
+  // 兜底:用户没在 models.json 配 codex → 注入默认模板条目(等价内置一份 example 的 codex 示例)。
+  // 用户显式配了 codex 就以用户为准,不覆盖。这样"配置化"(条目可改)与"开箱即用"(装了就有)兼得。
+  // 无条件注入(不看有没有装):装没装交给下面的 autoDetect 决定 disabled,这样本机没装 codex 时
+  // `--codex` 会得到明确的"未检测到 codex CLI"禁用报错,而不是静默退化成默认模型跑一遍。
+  if (!models.codex) {
+    models.codex = { ...CODEX_DEFAULT_ENTRY };
+  }
+
+  // 可用性装饰:任何声明了 autoDetect 的条目,本机没装对应 CLI 就标 disabled(而非凭空消失)。
+  // 这样 --help 里能看到"❌ --codex (禁用: 未检测到 codex CLI)",用户知道装了就能用,比静默注入更透明。
+  for (const [, m] of Object.entries(models)) {
+    if (m.autoDetect && !m.disabled && !detectBin(resolveBin(m))) {
+      m.disabled = true;
+      m.disabledReason = m.disabledReason || `本机未检测到 ${resolveBin(m)} CLI(或未登录)`;
+    }
+  }
+  return models;
 }
 
 // ── 主对话 session jsonl 定位(供 --with-context 找文件)──────────────────
@@ -171,9 +243,13 @@ function migrateLegacyState() {
   }
 }
 
-// 倒序扫 delegations.jsonl,取第一条 sessionCwd===cwd 的行 → { sessionId, write }。
+// 倒序扫 delegations.jsonl,取第一条 sessionCwd===cwd 的行 → { sessionId, write, harness }。
 // 等价于旧 readState()[cwd];链式续接每次 append 新行,倒序自然取最新 fork。
-function findLastDelegation(cwd) {
+// harnessFilter:传了就只认该 harness 的行(老行无 harness 字段视为 "claude")。
+// 为何要过滤:claude 和 codex 的 session 存储/续接机制完全不同(claude 扫 ~/.claude/projects
+// 反查 jsonl,codex 靠 ~/.codex/sessions),续接时必须只认同 harness 的上次委派,否则
+// 会拿 codex thread_id 去 claude 分支扫 jsonl → 硬失败(见 review 发现 A)。
+function findLastDelegation(cwd, harnessFilter = null) {
   if (!existsSync(DELEGATIONS_FILE)) return null;
   try {
     const lines = readFileSync(DELEGATIONS_FILE, "utf8").trim().split("\n");
@@ -181,7 +257,28 @@ function findLastDelegation(cwd) {
       if (!lines[i]) continue;
       try {
         const e = JSON.parse(lines[i]);
-        if (e.sessionId && e.sessionCwd === cwd) return { sessionId: e.sessionId, write: !!e.write };
+        if (!e.sessionId || e.sessionCwd !== cwd) continue;
+        const h = e.harness || "claude";  // 老行无此字段,视为 claude
+        if (harnessFilter && h !== harnessFilter) continue;
+        return { sessionId: e.sessionId, write: !!e.write, harness: h };
+      } catch { /* 单行损坏跳过 */ }
+    }
+  } catch { /* 文件读不到跳过 */ }
+  return null;
+}
+
+// 从 delegations.jsonl 倒序找某 sessionId 的归属目录(sessionCwd)。
+// 用于 codex 点名续接:codex 的 session 不在 ~/.claude/projects(findSessionCwd 扫不到),
+// 只能靠 gkd 自己记的 sessionCwd 还原它属于哪个目录,避免把外部线程错记到当前 cwd。
+function findSessionCwdInDelegations(sessionId) {
+  if (!sessionId || !existsSync(DELEGATIONS_FILE)) return null;
+  try {
+    const lines = readFileSync(DELEGATIONS_FILE, "utf8").trim().split("\n");
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i]) continue;
+      try {
+        const e = JSON.parse(lines[i]);
+        if (e.sessionId === sessionId && e.sessionCwd) return e.sessionCwd;
       } catch { /* 单行损坏跳过 */ }
     }
   } catch { /* 文件读不到跳过 */ }
@@ -246,6 +343,8 @@ function parseArgs(argv, modelKeys) {
     allowedTools: null,
     promptFile: null,      // --prompt-file:把文件内容作为前置系统指令注入子进程
     render: null,          // --render <kind>:对子进程 result 做结构化渲染(目前仅 "review")
+    codexModel: null,      // --codex-model:覆盖 codex 的模型(缺省用本机 config.toml 默认);仅 harness=codex 有意义
+    codexEffort: null,     // --codex-effort:覆盖 codex 的 reasoning effort;仅 harness=codex 有意义
     json: false,
     help: false,
     quiet: false,
@@ -275,6 +374,16 @@ function parseArgs(argv, modelKeys) {
       if (!v || !RENDER_KINDS.includes(v)) fail(`--render 需要一个渲染类型参数(当前支持: ${RENDER_KINDS.join(", ")})`);
       opts.render = v;
     }
+    else if (a === "--codex-model") {
+      const v = argv[++i];
+      if (!v || v.startsWith("--")) fail("--codex-model 需要一个模型名参数");
+      opts.codexModel = v;
+    }
+    else if (a === "--codex-effort") {
+      const v = argv[++i];
+      if (!v || v.startsWith("--")) fail("--codex-effort 需要一个 effort 值参数(none/minimal/low/medium/high/xhigh)");
+      opts.codexEffort = v;
+    }
     else if (a === "--model") fail("--model 已废弃,请用 --<modelKey>(如 --glm),见 --help");
     else if (a === "--json") opts.json = true;
     else if (a === "--quiet") opts.quiet = true;
@@ -288,7 +397,10 @@ function parseArgs(argv, modelKeys) {
 function printHelp(models) {
   const rows = Object.entries(models).map(([k, v]) => {
     const tag = v.disabled ? "❌" : "✅";
-    return `  ${tag} --${k.padEnd(12)} ${v.model.padEnd(24)} ${v.disabled ? "(禁用: " + (v.disabledReason || "") + ")" : ""}\n` +
+    // codex 虚拟条目 model 为 null(用本机默认),展示成 "(codex 默认)";harness 非 claude 时标出。
+    const modelName = v.model || (v.harness === "codex" ? "(codex 默认)" : "?");
+    const hTag = v.harness && v.harness !== "claude" ? ` [harness:${v.harness}]` : "";
+    return `  ${tag} --${k.padEnd(12)} ${modelName.padEnd(24)}${hTag} ${v.disabled ? "(禁用: " + (v.disabledReason || "") + ")" : ""}\n` +
            `       ${v.description || ""}`;
   }).join("\n");
   process.stdout.write(`gkd-runtime —— 把任务委派给指定模型的 Claude Code 子进程
@@ -306,20 +418,151 @@ ${rows}
   --allowed-tools "..." 自定义工具列表
   --prompt-file <path>  把文件内容作为前置系统指令注入子进程(如 review prompt 模板)
   --render review       把子进程 result(应为 JSON)渲染成干净审查报告;解析失败则原文降级
+  --codex-model <名>    仅 --codex:覆盖 codex 模型(缺省用本机 config.toml 默认)
+  --codex-effort <档>   仅 --codex:覆盖 reasoning effort(none/minimal/low/medium/high/xhigh)
   --json                结构化输出(供 workflow 消费)
   --help, -h            打印此帮助
 `);
 }
 
-// ── 构造换脑子进程的参数 + 要注入的 env override ──────────────────────
+// ── harness 派发:按所选模型的 harness 字段选构造器 ────────────────────
+// 缺省 harness = "claude"(现状:spawn claude -p 换 BASE_URL);harness=="codex" 走 buildCodexSpawn。
+// 两个构造器返回统一形状,供 main() 无差别 spawn:
+//   { cli, args, envOverride, spawnCwd, stateCwd, parentSessionId, harness, outFile? }
 function buildSpawn(opts, cwd, models) {
   const m = models[opts.model];
   if (!m) {
     fail(`未知模型别名: ${opts.model}。可用: ${Object.keys(models).join(", ")}`);
   }
   if (m.disabled) {
-    fail(`模型 ${opts.model}(${m.model})当前不可用:${m.disabledReason || "(未注明原因)"}`);
+    fail(`模型 ${opts.model}(${m.model || m.harness || "?"})当前不可用:${m.disabledReason || "(未注明原因)"}`);
   }
+  if (m.harness === "codex") return buildCodexSpawn(opts, cwd, m);
+  return buildClaudeSpawn(opts, cwd, m);
+}
+
+// ── codex harness:spawn `codex exec` 子进程 ──────────────────────────
+// 与 claude 分支的返回形状一致。差异点:
+//   · 结果不走 stdout JSON,而是 -o 写临时文件(main 读它当 result)
+//   · session_id / usage 从 --json 的 JSONL 事件流里取(main 解析)
+//   · 读写靠 sandbox 三档(-s),不是 allowed-tools
+//   · resume 走 `codex exec resume <id>`,该子命令不接受 -s/-C(见下注释)
+//   · C 档 --with-context 禁用(需 app-server import,属阶段二)
+function buildCodexSpawn(opts, cwd, m) {
+  // C 档不可移植:codex 读不了 Claude 的 ~/.claude/projects/*.jsonl。明确拦截,别静默降级。
+  if (opts.withContext) {
+    fail("委派给 codex 暂不支持 --with-context(继承主对话历史):codex 侧需 app-server import,属阶段二。请去掉 --with-context,或改用 Claude 系模型委派。");
+  }
+
+  const outFile = join(tmpdir(), `gkd-codex-${process.pid}-${Date.now()}.txt`);
+  const args = [CODEX_SUBCOMMANDS.exec];
+
+  // 上下文档:A(默认新起)/ B(--resume 续 codex thread)。C 已在上面拦截。
+  let parentSessionId = null;
+  let stateCwd = cwd;   // 新委派记账到调用目录;点名续接改记原 thread 的归属目录(见下)
+  const resuming = opts.resume;
+  if (resuming) {
+    // codex 的 session 存 ~/.codex/sessions,按 thread_id 续。
+    args.push(CODEX_SUBCOMMANDS.resume);
+    if (opts.resumeId) {
+      parentSessionId = opts.resumeId;
+      args.push(opts.resumeId);
+      // 关键:点名续接的 thread 真实 cwd 从原 thread 继承(codex resume 不接受 -C),
+      // 若把新记录的 sessionCwd 记成"当前 cwd",会污染索引——之后在当前目录不带 id 续接
+      // 会续到这条外部 thread,写模式下改错仓库(见 review 发现)。故从 delegations 反查
+      // 原 thread 的归属目录沿用;查不到则保持 cwd(至少不比旧行为差,但发一条告警)。
+      const originCwd = findSessionCwdInDelegations(opts.resumeId);
+      if (originCwd) {
+        stateCwd = originCwd;
+      } else if (!opts.quiet) {
+        process.stderr.write(`[gkd] ⚠ 点名续 codex 线程 ${opts.resumeId.slice(0, 8)}... 在 gkd 记录里查不到归属目录,本次仍记到当前目录;后续在此目录不带 id 的 --codex --resume 可能续到它,建议续接时显式带 threadId\n`);
+      }
+    } else {
+      // 续本目录上次:从 gkd 自己的 delegations 取本目录最近一条 codex thread_id 显式传,
+      // 而不是用 codex 的 `--last`——后者是"codex CLI 全局最近一次",可能是用户在别的目录
+      // 或终端里直接跑的 codex,与 gkd 的"续本目录上次委派"语义不符(见 review 发现)。
+      const last = findLastDelegation(cwd, "codex");
+      if (!last) {
+        fail("--resume 找不到本目录上次的 codex 委派线程。若要点名续历史,传 --resume <threadId>;或去掉 --resume 开新委派。");
+      }
+      parentSessionId = last.sessionId;
+      args.push(last.sessionId);
+      // 续本目录上次:last 就是本 cwd 的记录,stateCwd 保持 cwd 正确。
+    }
+  }
+
+  // 模型:--codex-model 覆盖 > 条目 model(缺省 null)> 不传(用本机默认)
+  const model = opts.codexModel || m.model;
+  if (model) args.push(CODEX_FLAGS.model, model);
+
+  // reasoning effort:仅当用户显式给了 --codex-effort
+  if (opts.codexEffort) {
+    args.push(CODEX_FLAGS.config, `model_reasoning_effort="${opts.codexEffort}"`);
+  }
+
+  // 读写边界 → sandbox。统一走 -c sandbox_mode(不用 -s):因为 `codex exec resume` 不接受 -s,
+  // 而 -c sandbox_mode 新起/续接都认,是 -s 的底层等价开关。统一走它消除 resume/新起的分叉。
+  const sandboxMode = opts.write ? "workspace-write" : "read-only";
+  args.push(CODEX_FLAGS.config, `sandbox_mode="${sandboxMode}"`);
+
+  // 工作根目录:codex 的两条硬约束都在这——`codex exec resume` 不接受 -C(cwd 从原 thread 继承),
+  // 故仅新起时用 -C 钉到调用 cwd。--skip-git-repo-check 两路都加:非 git/非信任目录下不加会直接
+  // "Not inside a trusted directory" 失败(resume 也校验信任目录)。
+  if (!resuming) {
+    args.push(CODEX_FLAGS.cd, cwd);
+  }
+  args.push(CODEX_FLAGS.skipGitCheck);
+
+  // review 结构化:不用 codex 的 --output-schema。
+  // 原因:codex 的 --output-schema 走 OpenAI strict JSON schema 校验,要求 `required` 覆盖
+  // properties 里每个 key;而 gkd 的 review-output.schema.json 故意留可选字段(priority/confidence
+  // 分别只在缺陷式/对抗式必填),strict 模式直接 400 invalid_json_schema。
+  // 故 codex review 与 claude 侧走同一条路:靠 prompt 模板(--prompt-file 前置拼)要求吐 JSON,
+  // 再由 renderReviewResult 启发式提取——它本就为便宜模型的脏 JSON 设计,足够稳。
+
+  args.push(CODEX_FLAGS.json);
+  args.push(CODEX_FLAGS.outputLast, outFile);
+
+  // --prompt-file:codex exec 无 --append-system-prompt,把模板内容前置拼进任务文本。
+  let taskText = opts.task;
+  if (opts.promptFile) {
+    taskText = `${loadPromptFile(opts.promptFile)}\n\n---\n\n${taskText}`;
+  }
+  // codex exec 的任务文本是位置参数,必须放在所有 flag 之后的最后。resume 时它是续接后要发的新指令。
+  if (taskText) args.push(taskText);
+
+  return {
+    cli: resolveBin(m),     // 条目 bin > GKD_CODEX_BIN > "codex"
+    args,
+    envOverride: {},        // codex 用本机登录态(~/.codex/auth.json),不注入 BASE_URL/TOKEN
+    spawnCwd: null,         // 用 -C 显式指定 cwd(resume 除外),不靠 child cwd
+    stateCwd,               // 新委派=调用目录;点名续接=原 thread 归属目录(防索引污染)
+    parentSessionId,
+    harness: "codex",
+    outFile,
+    needsProxy: proxyNeeded(m),  // codex 默认 needsProxy:true → 保留用户代理(走公网需要)
+  };
+}
+
+// 读 --prompt-file 内容,读不到直接 fail。两个 build 分支共用,避免逻辑重复。
+function loadPromptFile(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (e) {
+    fail(`--prompt-file 读取失败 ${path}: ${e.message}`);
+  }
+}
+
+// 归一化"这个模型是否需要保留用户代理"。needsProxy 是当前字段;兼容早期引入过的 clearProxy
+// (clearProxy===false 等价 needsProxy===true)。默认 false = 不需要特殊代理 → childEnv 会清代理。
+function proxyNeeded(m) {
+  if (typeof m.needsProxy === "boolean") return m.needsProxy;
+  if (m.clearProxy === false) return true;   // 兼容旧配置字段
+  return false;
+}
+
+// ── claude harness(现状):spawn `claude -p --model` 换 BASE_URL ────────
+function buildClaudeSpawn(opts, cwd, m) {
 
   const baseUrl = expandEnv(m.baseUrl);
   const authToken = expandEnv(m.authToken);
@@ -342,13 +585,7 @@ function buildSpawn(opts, cwd, models) {
   // --prompt-file:把模板文件内容作为前置系统指令注入(主 token 零经手)。
   // 用于 review 等"角色/立场指令固定"的场景——指令沉在文件里,不靠主 Claude 现拼进任务文本。
   if (opts.promptFile) {
-    let promptText;
-    try {
-      promptText = readFileSync(opts.promptFile, "utf8");
-    } catch (e) {
-      fail(`--prompt-file 读取失败 ${opts.promptFile}: ${e.message}`);
-    }
-    args.push(CLI_FLAGS.appendSystemPrompt, promptText);
+    args.push(CLI_FLAGS.appendSystemPrompt, loadPromptFile(opts.promptFile));
   }
 
   // 读写权限
@@ -413,11 +650,15 @@ function buildSpawn(opts, cwd, models) {
 
   args.push(CLI_FLAGS.outputFormat, "json");
   return {
+    cli: resolveBin(m),   // 条目 bin > GKD_CLAUDE_BIN > "claude"
     args,
     envOverride: { ANTHROPIC_BASE_URL: baseUrl, ANTHROPIC_AUTH_TOKEN: authToken, ...modelEnv },
     spawnCwd,
     stateCwd,
     parentSessionId,
+    harness: "claude",
+    outFile: null,
+    needsProxy: proxyNeeded(m),  // 默认 false → childEnv 清代理;需要代理的端点在条目里设 needsProxy:true
   };
 }
 
@@ -426,13 +667,19 @@ function fail(msg) {
   process.exit(1);
 }
 
-// 清理代理变量(与 ~/.zshrc 的 claude 包装函数一致),避免内网网关被代理拦截。
-// override 用于按所选模型注入 BASE_URL/AUTH_TOKEN(不同模型可能走不同端点)。
-function childEnv(override = {}) {
+// 组装子进程 env。override 用于按所选模型注入 BASE_URL/AUTH_TOKEN(不同模型可能走不同端点)。
+// needsProxy:这个端点是否需要走用户环境里的代理,默认 false。
+//   默认清代理:某些 API 端点走系统/企业代理会被拦截或劫持,清掉代理变量让子进程直连更稳。
+//   走公网、确实需要代理才能连通的端点(如 codex)在 config/models.json 的条目里设
+//   `"needsProxy": true`,子进程就保留用户的 HTTP(S)_PROXY 等变量(per-model 配置,不在代码里按
+//   harness 写死)。codex 默认条目已带 needsProxy:true。
+function childEnv(override = {}, needsProxy = false) {
   const env = { ...process.env, ...override };
-  for (const k of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-                    "http_proxy", "https_proxy", "all_proxy", "no_proxy"]) {
-    delete env[k];
+  if (!needsProxy) {
+    for (const k of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                      "http_proxy", "https_proxy", "all_proxy", "no_proxy"]) {
+      delete env[k];
+    }
   }
   return env;
 }
@@ -606,6 +853,21 @@ function main() {
     fail("缺少任务文本。运行 gkd-runtime --help 查看用法。");
   }
 
+  // 当前所选模型的 harness(缺省 claude)。resume 续接必须按它过滤上次委派记录:
+  // claude 和 codex 的 session 存储/续接机制不同,续错 harness 会硬失败(见 review 发现 A)。
+  const selectedHarness = models[opts.model]?.harness || "claude";
+
+  // --resume 且不点名(续本目录上次)时,先校验上次委派的 harness 与当前所选一致。
+  // 不一致就 fail 并给出可操作提示,而不是让 buildClaudeSpawn 拿 codex thread_id 去扫
+  // ~/.claude/projects 报"找不到 jsonl"(那个报错对用户毫无指向性)。
+  if (opts.resume && !opts.resumeId) {
+    const last = findLastDelegation(cwd);  // 不过滤,先看本目录最新一条到底是谁
+    if (last && last.harness !== selectedHarness) {
+      fail(`本目录上次委派是 ${last.harness} harness,但当前要用 ${selectedHarness} 续接——两者 session 机制不同,不能混续。` +
+           `请用 ${last.harness === "codex" ? "--codex" : "Claude 系模型"} 续接上次,或开一条新委派(不加 --resume)。`);
+    }
+  }
+
   // --resume 时,若用户没显式 --write,则恢复该会话的读写模式。显式 --write 永远胜过继承。
   // 两条来源分开:点名续 id 从 delegations.jsonl 按 id 反查;续本目录上次取该 cwd 最新一条。
   if (opts.resume && !opts.write) {
@@ -618,7 +880,9 @@ function main() {
         process.stderr.write(`[gkd] 点名续会话:${m === "read" ? "恢复只读模式" : "无历史读写记录,默认只读"};需写文件请用 /gkd:do --resume ${opts.resumeId.slice(0, 8)}...\n`);
       }
     } else {
-      const last = findLastDelegation(cwd);
+      // 按 harness 过滤取本目录上次(harness 一致性已在上面校验过,这里过滤是为跨 harness 交错
+      // 委派时取到正确的那条 write 模式,而非最新但异 harness 的一条)。
+      const last = findLastDelegation(cwd, selectedHarness);
       if (last?.write) {
         opts.write = true;
         if (!opts.quiet) process.stderr.write(`[gkd] 续会话:从上次继承写模式\n`);
@@ -626,12 +890,12 @@ function main() {
     }
   }
 
-  const { args: claudeArgs, envOverride, spawnCwd, stateCwd, parentSessionId } = buildSpawn(opts, cwd, models);
-  const cli = process.env.GKD_CLAUDE_BIN || "claude";
+  const { cli, args: childArgs, envOverride, spawnCwd, stateCwd, parentSessionId, harness, outFile, needsProxy } = buildSpawn(opts, cwd, models);
 
   const startMs = Date.now();
-  const child = spawn(cli, claudeArgs, {
-    env: childEnv(envOverride),
+  const child = spawn(cli, childArgs, {
+    // 是否保留代理由模型条目的 needsProxy 决定(默认清代理),见 childEnv 注释。
+    env: childEnv(envOverride, needsProxy),
     stdio: ["ignore", "pipe", "pipe"],
     cwd: spawnCwd || undefined,  // null/undefined = 继承父进程 cwd(默认行为)
   });
@@ -641,57 +905,155 @@ function main() {
   child.stdout.on("data", (d) => (stdout += d));
   child.stderr.on("data", (d) => (stderr += d));
 
-  child.on("error", (e) => fail(`无法启动 claude 子进程: ${e.message}`));
+  child.on("error", (e) => fail(`无法启动 ${harness} 子进程(${cli}): ${e.message}`));
 
   child.on("close", (code) => {
-    let parsed;
-    try {
-      parsed = JSON.parse(stdout);
-    } catch {
-      fail(`子进程输出非 JSON(exit ${code}):\n${stdout.slice(0, 500)}\n${stderr.slice(0, 300)}`);
-    }
+    // 两个 harness 归一成同一形状:{ result, sessionId, isError, usage, modelUsed }。
+    // usage = { "<model名>": { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens } },
+    // 与 delegations.jsonl / gkd-stats 期望的 camelCase shape 一致。
+    const norm = harness === "codex"
+      ? parseCodexOutput(stdout, stderr, outFile, code, { modelOverride: opts.codexModel, quiet: opts.quiet })
+      : parseClaudeOutput(stdout, stderr, code);
 
-    const result = parsed.result ?? "";
-    const modelUsed = parsed.modelUsage ? Object.keys(parsed.modelUsage) : [];
     // 只追加一条 delegation 行:其 sessionCwd 字段兼任「续本目录上次」的索引(取代旧 sessions.json)。
     appendDelegation({
       ts: new Date().toISOString(),
-      sessionId: parsed.session_id,  // 供 findSessionMode 反查 mode / findLastDelegation 续本目录上次
+      sessionId: norm.sessionId,  // 供 findSessionMode 反查 mode / findLastDelegation 续本目录上次
       // task = 委派原始任务摘要,供模糊检索。resume 行的 opts.task 是补充指令(非原始意图),
       // 写 null 保持语义纯净——该 session 的原始任务已记在它 spawn 那行。
       task: opts.resume ? null : makeTaskPreview(opts.task),
       parentSessionId,  // B 档 fork 自哪个 session(A/C 档为 null);串起 fork 链,检索时可回溯到最新节点
       modelKey: opts.model,
-      model: modelUsed,
+      model: norm.modelUsed,
+      harness,           // "claude"(缺省)/"codex";老行无此字段,读取方视为 claude
       mode: opts.withContext ? "with-context" : opts.resume ? "resume" : "clean",
       write: opts.write,
       cwd,                 // 调用时的当前目录
       sessionCwd: stateCwd, // session 真实归属目录(跨目录续时 ≠ cwd),兼任续本目录上次的索引键
-      ok: !parsed.is_error,
+      ok: !norm.isError,
       durationMs: Date.now() - startMs,
-      usage: parsed.modelUsage ?? {},
+      usage: norm.usage,
     });
 
     if (opts.json) {
       // 结构化输出,供命令/workflow 消费
       process.stdout.write(JSON.stringify({
-        ok: !parsed.is_error,
-        model: modelUsed,
-        sessionId: parsed.session_id,
-        result,
+        ok: !norm.isError,
+        model: norm.modelUsed,
+        sessionId: norm.sessionId,
+        result: norm.result,
       }, null, 2) + "\n");
     } else {
       // 人类可读:结果 + 一行元信息(--quiet 时压制,供 brainstorm 等下游脚本干净消费 stdout)
       // --render review:把子进程 result(应为 JSON)渲染成干净报告;提取/校验失败则原文降级。
-      const humanOut = opts.render === "review" ? renderReviewResult(result) : result;
+      const humanOut = opts.render === "review" ? renderReviewResult(norm.result) : norm.result;
       process.stdout.write(humanOut + "\n");
       if (!opts.quiet) {
-        const tag = parsed.is_error ? "❌ 失败" : "✅";
-        process.stderr.write(`\n[gkd] ${tag} | 实际模型: ${modelUsed.join(",") || "?"} | session: ${parsed.session_id || "?"}\n`);
+        const tag = norm.isError ? "❌ 失败" : "✅";
+        process.stderr.write(`\n[gkd] ${tag} | harness: ${harness} | 实际模型: ${norm.modelUsed.join(",") || "?"} | session: ${norm.sessionId || "?"}\n`);
       }
     }
-    process.exit(parsed.is_error ? 1 : 0);
+    process.exit(norm.isError ? 1 : 0);
   });
+}
+
+// ── claude 输出解析:stdout 是单个 JSON 对象 ───────────────────────────
+function parseClaudeOutput(stdout, stderr, code) {
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    fail(`子进程输出非 JSON(exit ${code}):\n${stdout.slice(0, 500)}\n${stderr.slice(0, 300)}`);
+  }
+  return {
+    result: parsed.result ?? "",
+    sessionId: parsed.session_id,
+    isError: !!parsed.is_error,
+    usage: parsed.modelUsage ?? {},
+    modelUsed: parsed.modelUsage ? Object.keys(parsed.modelUsage) : [],
+  };
+}
+
+// ── codex 输出解析:result 在 -o 文件,session_id/usage 在 stdout 的 JSONL 事件流 ──
+// 事件形态(实测 codex-cli 0.136.0):
+//   {"type":"thread.started","thread_id":"<uuid>"}                          ← session id
+//   {"type":"item.completed","item":{"type":"agent_message","text":...}}    ← 最终消息(也写进 -o)
+//   {"type":"item.completed","item":{"type":"error","message":...}}         ← 报错
+//   {"type":"turn.completed","usage":{input_tokens,cached_input_tokens,output_tokens,reasoning_output_tokens}}
+function parseCodexOutput(stdout, stderr, outFile, code, { modelOverride = null, quiet = false } = {}) {
+  let sessionId = null;
+  let rawUsage = null;
+  let turnCompleted = false;
+  let turnFailed = false;
+  let turnFailMsg = "";     // turn.failed 事件里的错误消息(若有)
+  let lastAgentMsg = "";
+  let lastErrorItem = "";   // item.type==="error" 的消息(多为 warning,但真失败时是唯一线索)
+  for (const line of stdout.split("\n")) {
+    const s = line.trim();
+    if (!s) continue;
+    let ev;
+    try { ev = JSON.parse(s); } catch { continue; }  // 非 JSON 行(告警等)跳过
+    if (ev.type === "thread.started" && ev.thread_id) sessionId = ev.thread_id;
+    else if (ev.type === "turn.completed") { turnCompleted = true; if (ev.usage) rawUsage = ev.usage; }
+    else if (ev.type === "turn.failed") { turnFailed = true; turnFailMsg = ev.error?.message || ev.message || ""; }
+    else if (ev.type === "item.completed" && ev.item?.type === "agent_message" && typeof ev.item.text === "string") {
+      lastAgentMsg = ev.item.text;
+    }
+    else if (ev.type === "item.completed" && ev.item?.type === "error" && typeof ev.item.message === "string") {
+      lastErrorItem = ev.item.message;
+    }
+    // 注意:item.type==="error" 不作为失败信号——codex 把 config deprecation 之类的
+    // warning 也塞成 error item(实测 `[features].codex_hooks` deprecated),退出码仍为 0、
+    // turn 照常 completed。真失败看退出码 / turn.failed / 拿不到结果。
+  }
+
+  // result:优先读 -o 文件(codex 保证最终消息在此);读不到回落 stdout 里最后的 agent_message。
+  let result = "";
+  if (outFile) {
+    try { result = readFileSync(outFile, "utf8").trim(); } catch { /* 回落 */ }
+    try { unlinkSync(outFile); } catch { /* 临时文件,清理失败无妨 */ }
+  }
+  if (!result) result = lastAgentMsg;
+
+  // is_error 判定。成功的必要条件:退出码 0、无 turn.failed、且拿到 sessionId + turn.completed。
+  // 为何把 sessionId/turn.completed 列为硬条件(而非"有结果就算成功"):codex CLI 升级若改了
+  // 事件字段名(如 thread_id → 别的),我们会解析不到 sessionId,但 -o 文件仍可能有内容——
+  // 那样会静默记 ok=true + sessionId=null,续接链断裂、stats 缺 usage 却毫无征兆(见 review 发现)。
+  // 宁可在 schema 漂移时明确报失败 + 诊断,让问题浮出来,也不要静默半成功。
+  // schemaBroken 已覆盖"code0 且缺 sessionId/turn.completed"的全部情形;而 code≠0 / turn.failed
+  // 单独列出。原先还有个 (!turnCompleted && !result) 是死分支——!turnCompleted 时要么 schemaBroken
+  // 已 true(code0),要么前两项已 true(code≠0/failed),恒被覆盖,故删去。
+  const schemaBroken = code === 0 && !turnFailed && (!sessionId || !turnCompleted);
+  const isError = code !== 0 || turnFailed || schemaBroken;
+
+  // 失败但没拿到有效结果时,把诊断线索塞进 result,别让用户看到空白 ❌(见 review 发现 B)。
+  // codex 的启动/认证/参数错误常只写 stderr(如未登录、版本不支持 -c sandbox_mode、sandbox 拒绝);
+  // 优先级:turn.failed 消息 > error item 消息 > schema 漂移提示 > stderr 尾部。都截断防刷屏。
+  if (isError && !result) {
+    let diag = turnFailMsg || lastErrorItem;
+    if (!diag && schemaBroken) {
+      diag = `codex 事件流缺少 ${!sessionId ? "thread.started/thread_id" : "turn.completed"}——可能 codex CLI 版本升级改了事件格式,gkd 的解析(parseCodexOutput)需同步更新。`;
+    }
+    diag = diag || stderr.trim() || `codex 子进程退出码 ${code},无输出`;
+    result = `[gkd] codex 委派失败(exit ${code}):\n${diag.slice(0, 1500)}`;
+  } else if (isError && schemaBroken && !quiet) {
+    // 有结果但 schema 漂移:结果照给,但 stderr 明确警示,别让 sessionId=null 静默进 delegations。
+    process.stderr.write(`[gkd] ⚠ codex 事件流缺少 ${!sessionId ? "sessionId" : "turn.completed"},本次判为失败(结果仍返回);疑似 codex CLI 事件格式变更,parseCodexOutput 需更新\n`);
+  }
+
+  // 实际模型名:--codex-model 显式指定则用它,否则标 "codex"(事件流不反解模型名)。
+  // 模型身份与 usage 是否存在解耦:即便没拿到 usage 也返回模型名,usage 单独为空对象。
+  const modelName = modelOverride || "codex";
+  const usage = rawUsage ? {
+    [modelName]: {
+      inputTokens: Number(rawUsage.input_tokens ?? 0),
+      outputTokens: Number(rawUsage.output_tokens ?? 0),
+      cacheReadInputTokens: Number(rawUsage.cached_input_tokens ?? 0),
+      cacheCreationInputTokens: 0,  // codex 不区分 cache creation
+    },
+  } : {};
+
+  return { result, sessionId, isError, usage, modelUsed: [modelName] };
 }
 
 // 仅在作为脚本直接运行时启动 main;被 import(如单测)时不自动执行。

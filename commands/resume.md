@@ -63,4 +63,5 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/gkd-find-session.mjs" <关键词...> [--all-
 - **点名续 id 是从那个 session fork 出新分支**(不是原地续写):反复续同一个旧 id 会各自开一条平行分叉。想链式往下续,续完后用新打印的 session id、或回到该目录直接 `/gkd:resume`。
 - **跨目录点名续接后,新 session 记账到它的归属目录(而非你当前目录)**:所以随后在当前目录敲**不带 id** 的 `/gkd:resume` 不会顺着刚才那次跨目录续接,而是续当前目录自己的上次委派。想接着刚才那条,请再次点名 id 或用模糊描述检索(这是刻意设计——跨目录续本就是显式点名行为,不做隐式链式)。
 - runtime 报"找不到 session ... 的 jsonl" = id 错了/文件被清理/是别的机器的 session;报"找不到上次的委派线程" = 本目录还没委派过,引导用户改用 `/gkd:ask` 或 `/gkd:do` 发起新委派。
+- **续 codex 委派(harness:codex)的差异**:codex 的 thread 存在 `~/.codex/sessions`(不是 Claude 的 jsonl),续接走 `codex exec resume`。它**不接受 cwd/沙箱覆盖**——续接的工作目录和读写模式从原 thread 继承(gkd 靠 `-c sandbox_mode` 把只读会话升级成写)。上面那些"jsonl 归属目录""跨目录续"的说法是 Claude 侧机制,对 codex 不适用;codex 续接就是按 thread id 续、cwd 跟原 thread 走。
 - `❌ 失败` 时把 result 里的 API 错误原文告知用户。
