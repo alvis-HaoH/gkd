@@ -17,10 +17,10 @@ allowed-tools: Glob, Grep, Bash(node:*), Bash(git:*), Workflow
 2. **选模型(默认从简)**:
    - 用户显式传 `--<modelKey>` → 全批锁定该模型。
    - **同构批量**(N 个文件相同改动)→ 默认统一一个便宜的能胜任模型最简单稳妥,不必逐 item 折腾。
-   - **item 明显异构**(部分含图片、部分高难、部分普通改写)才按 item 分模型,按 `config/model-routing.md` + `config/models.json` 判断,别在脚本里写死模型名。
+   - **item 明显异构**(部分含图片、部分高难、部分普通改写)才按 item 分模型,别在脚本里写死模型名。**含图片的 item 只能派给支持视觉的模型**:!`node "${CLAUDE_PLUGIN_ROOT}/scripts/gkd-runtime.mjs" --list-vision`
    - **worker/verifier 角色分工**:若任务是"改 + 验"两步,让 worker(便宜模型干活)和 verifier(另一模型把关/换视角)走不同模型是有价值的。
 
-3. **写 workflow 脚本**。注意 Workflow 脚本运行时**没有 `bash()` hook,也不能直接跑 shell**;`agent()` 的 model 参数又只认 Claude 系标识符,**换不了第三方模型脑**。所以换脑只能这样链接:`agent()` 起一个**轻量启动器子代理**(用便宜的 `haiku`,活只是跑一条命令拿回 JSON),让它用 Bash 工具调 `gkd-runtime.mjs`——**真正换脑发生在 runtime spawn 的子进程那层**(便宜模型在那里干活、token 隔离)。
+3. **写 workflow 脚本**。注意 Workflow 脚本运行时**没有 `bash()` hook,也不能直接跑 shell**;`agent()` 的 model 参数又只认 Claude 系标识符,**换不了第三方模型脑**。所以换脑只能这样链接:`agent()` 起一个**轻量启动器子代理**(用便宜的 `haiku`,活只是跑一条命令拿回 JSON),让它用 Bash 工具调 `gkd-runtime.mjs`——**真正换脑发生在 runtime spawn 的子进程那层**(三方模型在那里干活、token 隔离)。
 
    核心 stage 形如(`pickModel` 按上面策略算 runtime 的 `--<modelKey>`,不是写死;`--write` 用户传了才加):
 

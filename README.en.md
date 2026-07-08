@@ -107,9 +107,6 @@ The template ships with three example entries — **GLM · Kimi · Deepseek** (t
       "model": "glm-5.2",
       "baseUrl": "${ANTHROPIC_BASE_URL}",
       "authToken": "${ANTHROPIC_AUTH_TOKEN}",
-      "description": "A cheap all-rounder; takes on the vast majority of downgradeable work. The main Claude picks a model based only on this text.",
-      "capabilities": ["coding", "agentic"],
-      "avoid_for": ["vision input"],
       "pricingKey": "fireworks_ai/glm-5p2"
     }
   }
@@ -119,7 +116,8 @@ The template ships with three example entries — **GLM · Kimi · Deepseek** (t
 Key points:
 
 - **`baseUrl` / `authToken` support `${ENV_VAR}` interpolation** — pass secrets via environment variables, don't hardcode them.
-- **`description` is the main Claude's sole basis for picking a model** — state honestly what each model is and isn't good at.
+- **Model choice is explicit**: name it with `/gkd:ask --glm ...`; when unspecified the main Claude decides for itself, falling back to the default (first non-disabled entry) when unsure.
+- **Add `"supportsVision": true` to models that accept image input** — the main Claude can't infer modality from a model name, so it uses this to avoid sending pictures to a model that can't read them. The runtime enforces one hard guard: with `--with-context` when the main conversation contains images, if the chosen model isn't marked `supportsVision` it fails fast (rather than waiting for the subprocess to hit a 400 from the endpoint). The path where the subprocess `Read`s an image file itself can't be predicted by the runtime, so it relies on the main Claude picking the right model.
 - **The first non-disabled model is the default.**
 - Adding a model means editing only this file; the runtime reads it automatically, no code changes.
 - Some gateways don't support the new CLI's `adaptive` thinking and return 400 — add `"env": { "MAX_THINKING_TOKENS": "0" }` to that model to turn thinking off and work around it.
@@ -228,7 +226,6 @@ gkd/
 │   ├── plugin.json          # plugin metadata
 │   └── marketplace.json     # self-hosted marketplace (one-click install for others)
 ├── commands/                # 7 slash commands
-├── skills/gkd-delegate/     # delegation discipline (the playbook when the main Claude delegates on its own)
 ├── scripts/
 │   ├── gkd-runtime.mjs         # brain-swap core (the heart of it)
 │   ├── gkd-brainstorm.mjs      # multi-model parallel
@@ -236,8 +233,7 @@ gkd/
 │   └── gkd-stats.mjs           # usage stats TUI
 ├── bin/gkd-stats            # zero-model-cost entry to view stats
 ├── config/
-│   ├── models.example.json  # model registry template (copy to models.json)
-│   └── model-routing.md     # cross-model selection preferences (natural language, freely editable)
+│   └── models.example.json  # model registry template (copy to models.json)
 └── prompts/                 # the two review-stance templates
 ```
 

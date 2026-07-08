@@ -107,9 +107,6 @@ cp config/models.example.json config/models.json
       "model": "glm-5.2",
       "baseUrl": "${ANTHROPIC_BASE_URL}",
       "authToken": "${ANTHROPIC_AUTH_TOKEN}",
-      "description": "便宜的全能选手,承接绝大多数可降级的活。主 Claude 选模型只看这段描述。",
-      "capabilities": ["coding", "agentic"],
-      "avoid_for": ["视觉输入"],
       "pricingKey": "fireworks_ai/glm-5p2"
     }
   }
@@ -119,7 +116,8 @@ cp config/models.example.json config/models.json
 要点:
 
 - **`baseUrl` / `authToken` 支持 `${ENV_VAR}` 插值** —— 推荐用环境变量传密钥，别把明文写进文件。
-- **`description` 是主 Claude 选模型的唯一依据** —— 老实写清这个模型擅长/不擅长什么。
+- **模型选择靠显式指定**：用 `/gkd:ask --glm ...` 点名;不指定时主 Claude 自行判断,拿不准就用默认(第一个未禁用条目)。
+- **支持视觉输入的模型加 `"supportsVision": true`** —— 主 Claude 无法从模型名推断模态,派带图任务时据此避开收不了图的模型。runtime 有一道硬护栏:`--with-context` 且主对话含图片时,若选定模型没标 `supportsVision`,直接 fail 拦住(不会等到子进程被端点 400)。子进程自己 `Read` 图片文件的路径 runtime 无从预判,靠主 Claude 自觉选对模型。
 - **第一个未禁用的模型 = 默认模型**。
 - 加新模型只改这个文件，runtime 自动读，无需改代码。
 - 某些网关未适配新版 CLI 的 `adaptive` thinking 会报 400，可在该模型加 `"env": { "MAX_THINKING_TOKENS": "0" }` 关掉 thinking 绕过。
@@ -228,7 +226,6 @@ gkd/
 │   ├── plugin.json          # plugin 元信息
 │   └── marketplace.json     # 自带 marketplace(让别人能一键装)
 ├── commands/                # 7 个 slash 命令
-├── skills/gkd-delegate/     # 委派纪律(主 Claude 自发委派时的纲领)
 ├── scripts/
 │   ├── gkd-runtime.mjs         # 换脑底座(核心)
 │   ├── gkd-brainstorm.mjs      # 多模型并行
@@ -236,8 +233,7 @@ gkd/
 │   └── gkd-stats.mjs           # 用量统计 TUI
 ├── bin/gkd-stats            # 零模型成本看 stats 的入口
 ├── config/
-│   ├── models.example.json  # 模型注册表模板(复制成 models.json 用)
-│   └── model-routing.md     # 跨模型选择偏好(自然语言,可自由编辑)
+│   └── models.example.json  # 模型注册表模板(复制成 models.json 用)
 └── prompts/                 # review 的两种立场模板
 ```
 

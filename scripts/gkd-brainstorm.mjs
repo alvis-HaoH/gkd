@@ -67,7 +67,8 @@ function parseArgs(argv) {
 function printHelp(models) {
   const rows = Object.entries(models).map(([k, v]) => {
     const tag = v.disabled ? "❌" : "✅";
-    return `  ${tag} ${k.padEnd(12)} ${v.model.padEnd(24)} ${v.disabled ? "(禁用)" : ""}`;
+    const modelName = v.model || (v.harness === "codex" ? "(codex 默认)" : "?");
+    return `  ${tag} ${k.padEnd(12)} ${modelName.padEnd(24)} ${v.disabled ? "(禁用)" : ""}`;
   }).join("\n");
   process.stdout.write(`gkd-brainstorm —— 多模型并行 brainstorming(各自独立回答,主 Claude 综合)
 

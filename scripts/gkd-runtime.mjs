@@ -84,8 +84,7 @@ const CODEX_DEFAULT_ENTRY = {
   harness: "codex",
   model: null,                 // null = 用本机 ~/.codex/config.toml 的默认模型
   // 不写死 bin:让 resolveBin 走 GKD_CODEX_BIN env 兜底 → "codex",这样 env 覆盖对探测也生效。
-  description: "OpenAI Codex(本机已登录 CLI)—— 原生 harness 驱动 GPT,agentic 改代码强;适合要 GPT 视角、或独立于 Claude harness 的第二意见。走订阅额度,不计入 token 成本估算。支持 --with-context(首次会把当前对话导入成 codex thread,约 1-2s)。",
-  capabilities: ["coding", "agentic", "reasoning", "vision-input"],
+  supportsVision: true,        // codex(GPT)接受图片输入
   needsProxy: true,            // codex 走公网、需要代理 → 保留用户环境的代理变量
   autoDetect: true,            // 本机没装 codex CLI 时自动标 disabled
 };
@@ -184,6 +183,31 @@ function findSessionJsonl(sessionId) {
 
 function findSessionCwd(sessionId) {
   return findSessionJsonl(sessionId)?.cwd ?? null;
+}
+
+// 主对话 jsonl 里是否含图片输入(image content block)。--with-context 会把这段历史交给子进程
+// (claude 分支 --resume --fork-session;codex 分支 import 成 thread),图片随之进入子进程的模型请求。
+// 若子进程模型不支持视觉,含图请求会被端点拒绝(实测非 vision 端点返回 400)。所以带上下文委派前
+// 据此判断:含图 → 该次委派必须落到 supportsVision 模型上。检测只看 image block 是否出现,不解码 data。
+// 注:这只覆盖"图在主对话历史里"这一条路径;"子进程自己 Read 一个图片文件"runtime 无从预判
+// (任务是纯文本,不知道会读什么),那条仍靠命令层约定 + 子进程自身报错兜底。
+function jsonlHasImage(jsonlPath) {
+  if (!jsonlPath || !existsSync(jsonlPath)) return false;
+  let text;
+  try {
+    text = readFileSync(jsonlPath, "utf8");
+  } catch {
+    return false;  // 读不到不阻断委派(护栏是尽力而为,不该因 IO 失败卡死正常路径)
+  }
+  // 逐行解析,任一 user/assistant 消息的 content 数组里出现 type:"image" 即判含图。
+  for (const ln of text.split("\n")) {
+    if (!ln || ln.indexOf('"image"') === -1) continue;  // 快速预筛:整行无 image 字样直接跳过
+    try {
+      const c = JSON.parse(ln)?.message?.content;
+      if (Array.isArray(c) && c.some((b) => b?.type === "image")) return true;
+    } catch { /* 单行损坏跳过 */ }
+  }
+  return false;
 }
 
 // ── 委派流水 delegations.jsonl —— 单一 append-only 记录 ────────────────────
@@ -362,6 +386,7 @@ function parseArgs(argv, modelKeys) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") opts.help = true;
+    else if (a === "--list-vision") opts.listVision = true;
     else if (a === "--write") opts.write = true;
     else if (a === "--resume") {
       // --resume 后紧跟一个 UUID 形态的值 = 点名续该 sessionId;否则 = 续本目录上次。
@@ -408,8 +433,8 @@ function printHelp(models) {
     // codex 虚拟条目 model 为 null(用本机默认),展示成 "(codex 默认)";harness 非 claude 时标出。
     const modelName = v.model || (v.harness === "codex" ? "(codex 默认)" : "?");
     const hTag = v.harness && v.harness !== "claude" ? ` [harness:${v.harness}]` : "";
-    return `  ${tag} --${k.padEnd(12)} ${modelName.padEnd(24)}${hTag} ${v.disabled ? "(禁用: " + (v.disabledReason || "") + ")" : ""}\n` +
-           `       ${v.description || ""}`;
+    const vTag = v.supportsVision ? " [vision]" : "";
+    return `  ${tag} --${k.padEnd(12)} ${modelName.padEnd(24)}${hTag}${vTag} ${v.disabled ? "(禁用: " + (v.disabledReason || "") + ")" : ""}`;
   }).join("\n");
   process.stdout.write(`gkd-runtime —— 把任务委派给指定模型的 Claude Code 子进程
 
@@ -426,6 +451,7 @@ ${rows}
   --allowed-tools "..." 自定义工具列表
   --prompt-file <path>  把文件内容作为前置系统指令注入子进程(如 review prompt 模板)
   --render review       把子进程 result(应为 JSON)渲染成干净审查报告;解析失败则原文降级
+  --list-vision         打印支持视觉的模型 key(空格分隔),供命令文件注入;不跑委派
   --codex-model <名>    仅 --codex:覆盖 codex 模型(缺省用本机 config.toml 默认)
   --codex-effort <档>   仅 --codex:覆盖 reasoning effort(none/minimal/low/medium/high/xhigh)
   --json                结构化输出(供 workflow 消费)
@@ -483,6 +509,10 @@ async function buildCodexSpawn(opts, cwd, m) {
       const found = findSessionJsonl(mainSession);
       if (!found) {
         fail(`--with-context 找不到主 session ${mainSession.slice(0, 8)}... 的 jsonl 文件(扫遍 ~/.claude/projects/*)。可能 session 还没落盘,或文件被清理了。`);
+      }
+      // 视觉护栏:主对话含图但选定模型不支持视觉 → 提前 fail(与 claude 分支一致)。
+      if (jsonlHasImage(found.jsonlPath) && !m.supportsVision) {
+        fail(`主对话含图片输入,但模型 ${opts.model} 不支持视觉(models.json 未标 supportsVision:true)。请改用支持视觉的模型(如 --kimi / --gpt / --codex)后重试。`);
       }
       const originCwd = found.cwd;
       if (!opts.quiet) {
@@ -651,9 +681,14 @@ function buildClaudeSpawn(opts, cwd, m) {
     // 关键:child claude 按自己的 cwd 编码去找 ~/.claude/projects/<encoded-cwd>/<id>.jsonl,
     // 但用户在主会话期间可能 cd 漂移过,jsonl 实际还在启动 cwd 那一档。
     // 我们扫盘定位 jsonl 的真实归属 cwd,把 child 的 cwd 钉在那里,确保 --resume 能解析到。
-    const sessionOriginCwd = findSessionCwd(mainSession);
-    if (!sessionOriginCwd) {
+    const foundJsonl = findSessionJsonl(mainSession);
+    if (!foundJsonl) {
       fail(`--with-context 找不到主 session ${mainSession.slice(0, 8)}... 的 jsonl 文件(扫遍 ~/.claude/projects/*)。可能 session 还没落盘,或文件被清理了。`);
+    }
+    const sessionOriginCwd = foundJsonl.cwd;
+    // 视觉护栏:主对话含图但选定模型不支持视觉 → 提前 fail(否则子进程含图请求会被端点 400 拒)。
+    if (jsonlHasImage(foundJsonl.jsonlPath) && !m.supportsVision) {
+      fail(`主对话含图片输入,但模型 ${opts.model} 不支持视觉(models.json 未标 supportsVision:true)。请改用支持视觉的模型(如 --kimi / --gpt / --codex)后重试。`);
     }
     if (sessionOriginCwd !== cwd) {
       process.stderr.write(`[gkd] --with-context: 检测到 cwd 漂移(用户 ${cwd} → 原 session ${sessionOriginCwd}),已 override 子进程 cwd 以定位 session 文件\n`);
@@ -881,6 +916,15 @@ async function main() {
   const cwd = process.cwd();
 
   if (opts.help) { printHelp(models); process.exit(0); }
+  // --list-vision:吐出支持视觉的模型 key(空格分隔),供命令文件用 `!` 注入,免得主 Claude 自己读 models.json。
+  // 基于 loadModels() 合并后的注册表,所以自动注入的 codex 也在内(修了命令文件写死列表会漏 codex 的洞)。
+  if (opts.listVision) {
+    const vis = Object.entries(models)
+      .filter(([, m]) => m.supportsVision && !m.disabled)
+      .map(([k]) => `--${k}`);
+    process.stdout.write(vis.length ? vis.join(" ") : "(当前无支持视觉的可用模型)");
+    process.exit(0);
+  }
   if (!opts.model) opts.model = pickDefaultModel(models);
 
   migrateLegacyState();  // 幂等:首次运行把老 usage.jsonl+sessions.json 合并成 delegations.jsonl
