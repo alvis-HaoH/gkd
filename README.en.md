@@ -13,6 +13,8 @@ Two goals of equal weight:
 - **Save tokens** — the heavy lifting happens in the subprocess; the main Claude only pays for "instruction + result." Downgradeable work goes to a cheaper model.
 - **Borrow another model's perspective** — code, long-document summarization, vision, hard reasoning each have their own strengths. Swapping the brain lets you avoid being steered by one model's biases during brainstorm / cross-review, and hands each task to whichever model is best at it.
 
+> By default the subprocess runs on Claude Code's harness (`claude -p` with a swapped endpoint). If you have the [Codex CLI](https://developers.openai.com/codex/cli/) installed, you can also delegate to **codex** — that's a **different harness** where GPT works inside its own tool loop, on your codex login. See [Another harness: codex](#another-harness-delegating-to-local-codex-gpt) below.
+
 ---
 
 ## What it solves
@@ -76,6 +78,7 @@ GKD delegation stats                                      30d · cache 5m old
 
 - [Claude Code](https://claude.com/claude-code) installed (`claude` on your PATH)
 - At least one **Anthropic-compatible** model endpoint (official Claude API, OpenRouter, any compatible gateway) and its API key
+- (Optional) the [Codex CLI](https://developers.openai.com/codex/cli/) installed and logged in — then `--codex` delegates to GPT with no extra endpoint/key to configure; it uses codex's own login
 
 ### Step 1: add the marketplace and install
 
@@ -119,6 +122,7 @@ Key points:
 - **Model choice is explicit**: name it with `/gkd:ask --glm ...`; when unspecified the main Claude decides for itself, falling back to the default (first non-disabled entry) when unsure.
 - **Add `"supportsVision": true` to models that accept image input** — the main Claude can't infer modality from a model name, so it uses this to avoid sending pictures to a model that can't read them. The runtime enforces one hard guard: with `--with-context` when the main conversation contains images, if the chosen model isn't marked `supportsVision` it fails fast (rather than waiting for the subprocess to hit a 400 from the endpoint). The path where the subprocess `Read`s an image file itself can't be predicted by the runtime, so it relies on the main Claude picking the right model.
 - **The first non-disabled model is the default.**
+- **The `harness` field picks the harness**: defaults to `"claude"` (spawn `claude -p` with a swapped endpoint); set `"codex"` to delegate to the local codex CLI (see the dedicated section below). The template's `codex` entry is exactly such a `harness:"codex"` example — no baseUrl/authToken (it uses the local login), with `autoDetect:true` so it auto-disables when codex isn't installed.
 - Adding a model means editing only this file; the runtime reads it automatically, no code changes.
 - Some gateways don't support the new CLI's `adaptive` thinking and return 400 — add `"env": { "MAX_THINKING_TOKENS": "0" }` to that model to turn thinking off and work around it.
 
@@ -142,7 +146,7 @@ The main Claude **fills in flags intelligently** — just express yourself in na
 
 ```
 /gkd:do --glm convert all .js under src/legacy/ to TypeScript
-/gkd:ask --gpt does this concurrency design have a race condition?
+/gkd:review --codex does this concurrency design have a race condition?
 /gkd:brainstorm have glm, kimi, deepseek brainstorm xxx together
 ```
 
@@ -150,15 +154,13 @@ The main Claude **fills in flags intelligently** — just express yourself in na
 
 ## Three core mechanisms
 
-### 1. Brain swap: the one reliable switch
+### 1. Brain swap: the most reliable switch
 
-GKD doesn't swap models via environment variables (those get pinned by global settings); it spawns an isolated subprocess directly:
+Within the default claude harness, GKD doesn't swap models via environment variables (those get pinned by global settings); it spawns an isolated subprocess directly:
 
 ```
 claude -p --model <your-model> --setting-sources project ...
 ```
-
-`--model` is the one empirically reliable way to swap the brain, and the subprocess's tokens are **fully isolated** from the main conversation.
 
 ### 2. Three context tiers: decide how much the subprocess knows
 
@@ -203,6 +205,40 @@ One isolated subprocess per item, tokens isolated from each other, and you can a
 
 ---
 
+## Another harness: delegating to local codex (GPT)
+
+The brain swaps above all use one harness (Claude Code's tool loop) with a different model endpoint. GKD also lets you **swap the entire harness**: if you have the [Codex CLI](https://developers.openai.com/codex/cli/) installed and logged in, `--codex` spawns a `codex exec` subprocess so that **GPT works inside codex's own tool loop** — reading files, editing code, running commands.
+
+```mermaid
+flowchart LR
+    U([You]) --> Main[Main Claude<br/>orchestrate]
+    Main -->|--glm / --kimi …| RT[gkd-runtime.mjs]
+    RT -->|harness: claude| C["claude -p --model your-pick<br/>(swap endpoint)"]
+    RT -->|harness: codex| X["codex exec<br/>(swap whole harness · local login)"]
+
+    style Main fill:#d97757,color:#fff
+    style RT fill:#e9c46a,color:#000
+    style C fill:#2d6a4f,color:#fff
+    style X fill:#264653,color:#fff
+```
+
+**What it is, and isn't**: codex is a **different harness**, not just another cheap model. It runs on your codex subscription login (it doesn't consume Anthropic endpoint quota, and `/gkd:stats` doesn't cost it). Reach for it when you want **GPT's independent second opinion / a different-harness perspective / GPT-side capabilities** (e.g. GPT-image generation).
+
+**Works out of the box**: you don't even have to configure it in `models.json` — as long as `codex` is on your machine, the runtime injects a default codex entry; if it's not installed, `--codex` reports "codex CLI not detected" rather than silently falling back. To customize (model, effort), add an explicit `harness:"codex"` entry in `models.json`.
+
+**Supports all three context tiers**: `--with-context` works too — the first time it **imports the current conversation into a codex thread** (~1–2s), after which `--resume` continues that thread.
+
+**Two differences in write mode** (know these before delegating write tasks to codex):
+
+- **The write boundary is defined by codex's own sandbox** (`workspace-write`).
+- **codex write mode disables the network by default** — commands that need it (`npm install`, `git fetch`, …) will fail; don't delegate those to codex, give them to a claude-harness model.
+
+**Resume differences**: codex threads live in `~/.codex/sessions` (not Claude's jsonl), and resuming goes through `codex exec resume`, with the working directory following the original thread — the "jsonl home dir / cross-dir resume" mechanics elsewhere in this README are Claude-side and don't apply to codex.
+
+**codex-specific switches**: `--codex-model <name>` (override the local default model) and `--codex-effort <tier>` (none/minimal/low/medium/high/xhigh).
+
+---
+
 ## Calling the core directly
 
 Every command ultimately calls the same core; you can invoke it by hand too:
@@ -214,7 +250,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/gkd-runtime.mjs" [--<modelKey>] [options] "<
 node "${CLAUDE_PLUGIN_ROOT}/scripts/gkd-runtime.mjs" --help
 ```
 
-Key switches: `--write` (allow file edits), `--resume` (continue thread), `--with-context` (fork main conversation), `--prompt-file <path>` (inject a prepended system instruction, e.g. a review template), `--json` (structured output for workflow to consume).
+Key switches: `--write` (allow file edits), `--resume` (continue thread), `--with-context` (fork main conversation), `--prompt-file <path>` (inject a prepended system instruction, e.g. a review template), `--json` (structured output for workflow to consume). codex-specific: `--codex-model <name>`, `--codex-effort <tier>`.
 
 ---
 
@@ -227,8 +263,9 @@ gkd/
 │   └── marketplace.json     # self-hosted marketplace (one-click install for others)
 ├── commands/                # 7 slash commands
 ├── scripts/
-│   ├── gkd-runtime.mjs         # brain-swap core (the heart of it)
+│   ├── gkd-runtime.mjs         # brain-swap core (also dispatches the claude/codex harnesses)
 │   ├── gkd-brainstorm.mjs      # multi-model parallel
+│   ├── gkd-codex-import.mjs    # imports the current conversation into a codex thread for --with-context
 │   ├── gkd-find-session.mjs    # delegation-history search (main Claude turns a fuzzy description into a session id)
 │   └── gkd-stats.mjs           # usage stats TUI
 ├── bin/gkd-stats            # zero-model-cost entry to view stats

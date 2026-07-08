@@ -15,3 +15,7 @@ node_modules/
 # 临时文件
 *.draft
 *.tmp
+
+# 图片素材
+assets/brand/vendor
+assets/brand/gkd-brand.html

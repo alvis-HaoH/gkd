@@ -1,6 +1,6 @@
 {
   "name": "gkd",
-  "description": "搞快点(GKD,也是 GLM/Kimi/Deepseek 首字母)——任务委派 plugin。借 Claude Code 的工具循环 harness,把任务派给以其他模型为大脑的子 agent。两个并重的目的:省主 Claude 的 token(可降级的活交给便宜模型),以及借不同模型的视角(代码/长文/视觉/推理 各有所长,brainstorm/cross-review 跳出单一模型定式)。覆盖单任务委派、batch workflow、多模型 brainstorming。",
+  "description": "搞快点(GKD,也是 GLM/Kimi/Deepseek 首字母)——任务委派 plugin。借 Claude Code 的工具循环 harness,把任务派给以其他模型为大脑的claude code;也可用 --codex 委派给本机 codex CLI(GPT 在自家 harness 里干活)。两个并重的目的:省主 Claude 的 token(可降级的活交给便宜模型),以及借不同模型/harness 的视角(代码/长文/视觉/推理 各有所长,brainstorm/cross-review 跳出单一模型定式)。覆盖单任务委派、batch workflow、多模型 brainstorming。",
   "author": {
     "name": "alvis-HaoH",
     "url": "https://github.com/alvis-HaoH"
@@ -14,6 +14,8 @@
     "token-saving",
     "subagent",
     "workflow",
-    "brainstorm"
+    "brainstorm",
+    "codex",
+    "gpt"
   ]
 }

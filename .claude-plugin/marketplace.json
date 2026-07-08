@@ -4,16 +4,16 @@
     "name": "alvis-HaoH",
     "url": "https://github.com/alvis-HaoH"
   },
-  "description": "搞快点(GKD = GLM/Kimi/Deepseek)—— 把任务委派给以其他模型为大脑的子 agent,既省 token 也借不同模型的视角。",
+  "description": "搞快点(GKD = GLM/Kimi/Deepseek)—— 把任务委派给以其他模型为大脑的claude code(也可 --codex 委派给本机 codex/GPT),既省 token 也借不同模型/harness 的视角。",
   "plugins": [
     {
       "name": "gkd",
       "source": "./",
-      "description": "搞快点(GKD,也是 GLM/Kimi/Deepseek 首字母)。借 Claude Code 的工具循环,把任务派给换了脑的子 agent:可降级的活交给便宜模型省 token,也能借不同模型的视角(brainstorm/cross-review)。覆盖单任务委派、batch workflow、多模型 brainstorming。",
+      "description": "搞快点(GKD,也是 GLM/Kimi/Deepseek 首字母)。借 Claude Code 的工具循环,把任务派给换了脑的子 agent:可降级的活交给便宜模型省 token,也能借不同模型的视角(brainstorm/cross-review);还可用 --codex 委派给本机 codex CLI(GPT 在自家 harness 干活)。覆盖单任务委派、batch workflow、多模型 brainstorming。",
       "author": { "name": "alvis-HaoH" },
       "homepage": "https://github.com/alvis-HaoH/gkd",
       "license": "MIT",
-      "keywords": ["delegation", "cost-saving", "token-saving", "workflow", "brainstorm"]
+      "keywords": ["delegation", "cost-saving", "token-saving", "workflow", "brainstorm", "codex", "gpt"]
     }
   ]
 }
