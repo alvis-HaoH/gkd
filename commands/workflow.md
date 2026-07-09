@@ -1,7 +1,6 @@
 ---
 description: 把批量委派编排成 dynamic workflow——N 个 item 各派一个委派模型子进程并行处理。适合 50 个文件各转一次、N 个模块各审一次等同构批量。
 argument-hint: '[--<model>] [--write] <整体任务 + items 来源描述>'
-disable-model-invocation: true
 allowed-tools: Glob, Grep, Bash(node:*), Bash(git:*), Workflow
 ---
 

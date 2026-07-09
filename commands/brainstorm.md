@@ -1,7 +1,6 @@
 ---
 description: 多模型并行对同一问题各给独立意见(发散式 brainstorming),主 Claude 综合分歧、共识、独到见解。各模型彼此看不到对方答案,避免回声室效应。
 argument-hint: '[--models a,b,c] [--with-context] <问题(可多行)>'
-disable-model-invocation: true
 allowed-tools: Bash(node:*), AskUserQuestion
 ---
 

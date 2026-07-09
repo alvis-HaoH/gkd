@@ -1,7 +1,6 @@
 ---
 description: 委派模型对本地 git 改动做代码审查。只读不改文件。--adversarial 切对抗式设计审查;可用 --<modelKey> 指定模型
 argument-hint: '[--<model>] [--adversarial] [--base <ref>] [--scope auto|working-tree|branch] [--wait|--background] [<额外关注点>]'
-disable-model-invocation: true
 allowed-tools: Read, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
 
