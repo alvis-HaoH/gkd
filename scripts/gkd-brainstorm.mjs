@@ -44,10 +44,38 @@ function loadModels() {
 }
 
 // ── 参数解析 ───────────────────────────────────────────────────────────
+const EFFORT_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"];
+
+// 解析 --effort 的值,支持两种粒度,返回带 kind 标签的结构(不占用模型 key 命名空间):
+//   "xhigh"               → 统一档:{ kind: "all", level: "xhigh" }
+//   "glm:max,gpt:high"    → 按模型:{ kind: "perModel", map: { glm:"max", gpt:"high" } }
+// 只要出现冒号就按 per-model 解析。非法档位、格式错误(非恰好一个冒号)直接 fail——
+// 校验必须 fail-closed:brainstorm 固定后台跑,一旦放行就是整批昂贵调用,拼错的 key
+// 若只告警不拦截,用户看到提醒时钱已经花了(见 review 发现 4)。参与模型集校验在 main() 里做
+// (这里还不知道哪些模型参与)。
+function parseEffort(raw) {
+  if (!raw.includes(":")) {
+    if (!EFFORT_LEVELS.includes(raw)) fail(`--effort 档位非法: "${raw}"(可用 ${EFFORT_LEVELS.join("/")})`);
+    return { kind: "all", level: raw };
+  }
+  const map = {};
+  for (const part of raw.split(",").map(s => s.trim()).filter(Boolean)) {
+    const segs = part.split(":");
+    if (segs.length !== 2) fail(`--effort 的 per-model 项须恰好含一个冒号(model:档位),收到 "${part}"`);
+    const k = segs[0].trim(), v = segs[1].trim();
+    if (!k || !v) fail(`--effort 的 per-model 项格式应为 model:档位,收到 "${part}"`);
+    if (!EFFORT_LEVELS.includes(v)) fail(`--effort 档位非法: "${v}"(可用 ${EFFORT_LEVELS.join("/")})`);
+    if (map[k]) fail(`--effort 里模型 "${k}" 重复指定`);
+    map[k] = v;
+  }
+  return { kind: "perModel", map };
+}
+
 function parseArgs(argv) {
   const opts = {
     models: null,           // null=全部未禁用;数组=显式指定子集
     withContext: false,
+    effort: null,           // null=不调;{kind:"all",level}=统一;{kind:"perModel",map}=按模型
     json: false,
     help: false,
     question: [],
@@ -57,11 +85,23 @@ function parseArgs(argv) {
     if (a === "--help" || a === "-h") opts.help = true;
     else if (a === "--models") opts.models = argv[++i].split(",").map(s => s.trim()).filter(Boolean);
     else if (a === "--with-context") opts.withContext = true;
+    else if (a === "--effort") {
+      const v = argv[++i];
+      if (!v || v.startsWith("--")) fail("--effort 需要一个值(统一档如 xhigh,或 per-model 如 glm:max,gpt:high)");
+      opts.effort = parseEffort(v);
+    }
     else if (a === "--json") opts.json = true;
     else opts.question.push(a);
   }
   opts.question = opts.question.join(" ").trim();
   return opts;
+}
+
+// 给定模型 key + 已解析的 effort 结构,算出该模型该用哪档(没有则 null)。
+function effortFor(effort, modelKey) {
+  if (!effort) return null;
+  if (effort.kind === "all") return effort.level;
+  return effort.map[modelKey] || null;
 }
 
 function printHelp(models) {
@@ -80,6 +120,8 @@ ${rows}
 选项:
   --models a,b,c   只让指定模型参与(逗号分隔)
   --with-context   每个子进程加载主对话历史
+  --effort <值>    思考强度。统一档: --effort xhigh(所有模型同档);
+                   按模型: --effort glm:max,gpt:high(未列出的用默认)。档位 none/low/medium/high/xhigh/max
   --json           结构化输出
   --help, -h       打印此帮助
 
@@ -89,10 +131,11 @@ ${rows}
 }
 
 // ── 单个模型的子进程封装 ──────────────────────────────────────────────
-function runOne(modelKey, question, withContext) {
+function runOne(modelKey, question, withContext, effort) {
   return new Promise((resolve) => {
     const args = [RUNTIME, `--${modelKey}`, "--quiet"];
     if (withContext) args.push("--with-context");
+    if (effort) args.push("--effort", effort);
     args.push(question);
     const child = spawn("node", args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
@@ -149,11 +192,20 @@ async function main() {
   }
   if (participating.length === 0) fail("没有可用模型(全部 disabled)。");
 
+  // per-model --effort 指向未参与的模型 → fail-closed。spawn 前拦截:brainstorm 固定后台跑,
+  // 放行等于整批昂贵调用已发生,拼错的 key(如 glmm:max)若只告警,用户看到时钱已花(见 review 发现 4)。
+  if (opts.effort && opts.effort.kind === "perModel") {
+    const stray = Object.keys(opts.effort.map).filter(k => !participating.includes(k));
+    if (stray.length) {
+      fail(`--effort 指定了未参与的模型: ${stray.join(", ")}。参与的模型: ${participating.join(", ")}(检查拼写或 --models)`);
+    }
+  }
+
   process.stderr.write(`[gkd-brainstorm] 并行问 ${participating.length} 个模型: ${participating.join(", ")}\n`);
 
   // 并行 spawn,任一失败不影响其他
   const results = await Promise.all(
-    participating.map((k) => runOne(k, opts.question, opts.withContext))
+    participating.map((k) => runOne(k, opts.question, opts.withContext, effortFor(opts.effort, k)))
   );
 
   // 输出

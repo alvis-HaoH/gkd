@@ -15,7 +15,7 @@ $ARGUMENTS
 
 ## 怎么做
 
-1. **拣 flags**:识别 `--<modelKey>`(见 `${CLAUDE_PLUGIN_ROOT}/config/models.json`)、`--with-context`、`--resume`、`--json`、`--quiet`。**`--write` 由命令自动加,不用让用户重复传。**
+1. **拣 flags**:识别 `--<modelKey>`(见 `${CLAUDE_PLUGIN_ROOT}/config/models.json`)、`--with-context`、`--resume`、`--effort <档>`、`--json`、`--quiet`。**`--write` 由命令自动加,不用让用户重复传。** `--effort`(none/low/medium/high/xhigh/max)调思考强度,claude/codex 模型通用;用户说"深想一点/xhigh""快速点/别想太多"之类就补上。不传则各 harness 用自己的默认档。
    - **续历史会话并写**:`/gkd:do --resume [<sessionId>] <补充>` 可续上次(或点名续某次)委派**并给写权限**(即使原会话是只读)。续接语义、sessionId 检索 SOP、UUID 误拣防范、`--with-context` 互斥等规则,统一见 `commands/resume.md`——此处不复述,避免两处漂移。
 
 2. **选模型**:

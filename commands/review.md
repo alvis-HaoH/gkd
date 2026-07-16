@@ -32,6 +32,7 @@ allowed-tools: Read, Bash(node:*), Bash(git:*), AskUserQuestion
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/gkd-runtime.mjs" \
   <用户的 --<modelKey>(若有,否则不传走默认)> \
+  <用户给了 --effort <档> 就带上(none/low/medium/high/xhigh/max);审查是想深想的典型场景,用户说"仔细审/对抗审用 max"之类就补 --effort max> \
   --allowed-tools "Read Grep Glob Bash(git:*)" \
   --prompt-file "<上面选定的模板路径>" \
   --render review \

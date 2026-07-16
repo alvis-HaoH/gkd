@@ -235,7 +235,8 @@ flowchart LR
 
 **Resume differences**: codex threads live in `~/.codex/sessions` (not Claude's jsonl), and resuming goes through `codex exec resume`, with the working directory following the original thread — the "jsonl home dir / cross-dir resume" mechanics elsewhere in this README are Claude-side and don't apply to codex.
 
-**codex-specific switches**: `--codex-model <name>` (override the local default model) and `--codex-effort <tier>` (none/minimal/low/medium/high/xhigh).
+**Reasoning effort**: `--effort <tier>` (none/low/medium/high/xhigh/max), shared by claude/codex. Each harness maps an unsupported tier to its nearest supported one (claude has no `none` → uses `low`), without erroring or dropping semantics.
+**codex-specific switches**: `--codex-model <name>` (override the local default model).
 
 ---
 
@@ -250,7 +251,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/gkd-runtime.mjs" [--<modelKey>] [options] "<
 node "${CLAUDE_PLUGIN_ROOT}/scripts/gkd-runtime.mjs" --help
 ```
 
-Key switches: `--write` (allow file edits), `--resume` (continue thread), `--with-context` (fork main conversation), `--prompt-file <path>` (inject a prepended system instruction, e.g. a review template), `--json` (structured output for workflow to consume). codex-specific: `--codex-model <name>`, `--codex-effort <tier>`.
+Key switches: `--write` (allow file edits), `--resume` (continue thread), `--with-context` (fork main conversation), `--effort <tier>` (reasoning effort none/low/medium/high/xhigh/max, shared by claude/codex), `--prompt-file <path>` (inject a prepended system instruction, e.g. a review template), `--json` (structured output for workflow to consume). codex-specific: `--codex-model <name>`.
 
 ---
 

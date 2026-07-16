@@ -20,7 +20,7 @@ $ARGUMENTS
 
 ## 怎么做
 
-1. **拣 flags**:`--<modelKey>`、`--json`、`--quiet`。**不要**手动加 `--write`(由继承决定)。
+1. **拣 flags**:`--<modelKey>`、`--effort <档>`、`--json`、`--quiet`。**不要**手动加 `--write`(由继承决定)。`--effort`(none/low/medium/high/xhigh/max)调思考强度,claude/codex 通用;用户说"这次深想一点/快速点"之类就补上。
 
 2. **定位要续哪个 session**(三种情况见开头):续本目录上次 → 不带 id;模糊描述 → 走检索 SOP(下一节)拿 id;用户直接粘 UUID → 直接用。**注意**:别因补充指令里恰好有类 UUID 串(trace id/GUID)就误拣成 `--resume <id>`,拿不准就当普通续——runtime 侧有 UUID 正则闸门兜底。
 

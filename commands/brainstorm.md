@@ -14,7 +14,7 @@ $ARGUMENTS
 
 ## 怎么做
 
-1. **拣 flags**:`--models a,b,c`、`--with-context`、`--json`、`--quiet`。
+1. **拣 flags**:`--models a,b,c`、`--with-context`、`--effort <值>`、`--json`、`--quiet`。`--effort` 调思考强度(档位 none/low/medium/high/xhigh/max),两种粒度:统一档 `--effort xhigh`(所有模型同档);按模型 `--effort glm:max,gpt:high`(未列出的用各自默认)。用户说"让 X 深想""都用 max 想"之类就补上。
 
 2. **`--with-context` 默认不带**:brainstorm 的卖点是独立性,带主对话历史会污染独立性 + N 倍成本。只有用户显式要求、或问题强回指主对话(评估"上面的"那个方案)时才考虑。不确定时用 `AskUserQuestion` 问一次(带历史 / 干净独立答题)。
 

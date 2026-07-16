@@ -15,7 +15,7 @@ $ARGUMENTS
 
 ## 怎么做
 
-1. **拣 flags**:识别 `--<modelKey>`(见 `${CLAUDE_PLUGIN_ROOT}/config/models.json`)、`--with-context`、`--resume`、`--json`、`--quiet`。**忽略 `--write`**——ask 只读,用户若需要修改就提醒他改用 `/gkd:do`。
+1. **拣 flags**:识别 `--<modelKey>`(见 `${CLAUDE_PLUGIN_ROOT}/config/models.json`)、`--with-context`、`--resume`、`--effort <档>`、`--json`、`--quiet`。**忽略 `--write`**——ask 只读,用户若需要修改就提醒他改用 `/gkd:do`。`--effort`(none/low/medium/high/xhigh/max)调思考强度,claude/codex 模型通用;用户说"深想一点/xhigh""快速点/别想太多"之类就补上。不传则各 harness 用自己的默认档。
 
 2. **选模型**:
 - 用户显式指定或自然语言提名("用 GPT 看看","让所有模型xxx")就用之;没说就自己判断挑一个合适的,拿不准就**不传**、让 runtime 用默认。

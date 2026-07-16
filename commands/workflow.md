@@ -36,6 +36,8 @@ allowed-tools: Glob, Grep, Bash(node:*), Bash(git:*), Workflow
 
    启动器用 haiku或sonnet 是因为它只是中转(spawn + 回传),不该烧贵模型;干实活的模型在 runtime 子进程里。并发度用 Workflow tool 默认,不用手设。
 
+   **思考强度 `--effort`**(none/low/medium/high/xhigh/max,claude/codex 通用):直接拼在 runtime 命令里即可,支持三种粒度——① 整批统一:每条命令都带同一个 `--effort xhigh`;② 按 item:`pickModel` 那样另写个 `pickEffort(item)` 按难度返回不同档(难 item 用 max、普通用默认不带);③ 按角色:worker stage 不带(省钱)、verifier stage 带 `--effort high`(把关更严)。用户说"都仔细想""难的那批深想""验证环节用 high"之类就据此拼。
+
 4. **汇报**:总数/成功/失败,失败 item 连错误原文列出。成功产出已落盘(--write)或在 result 里,不必全贴。
 
 ## 何时用 workflow

@@ -41,6 +41,7 @@ const CLI_FLAGS = {
   permissionMode: "--permission-mode",
   resume: "--resume",                // 续 session(委派线程 或 主对话 fork)
   forkSession: "--fork-session",     // 只读继承,不污染源 session
+  effort: "--effort",                // 思考强度(none/low/medium/high/xhigh/max),透传原生 --effort
   outputFormat: "--output-format",   // json,供解析
 };
 
@@ -375,14 +376,19 @@ function parseArgs(argv, modelKeys) {
     allowedTools: null,
     promptFile: null,      // --prompt-file:把文件内容作为前置系统指令注入子进程
     render: null,          // --render <kind>:对子进程 result 做结构化渲染(目前仅 "review")
+    effort: null,          // --effort:统一的思考强度旋钮(none/low/medium/high/xhigh/max)。claude harness 透传原生
+                           //   --effort(none 就近映射为 low);codex harness 翻译成 model_reasoning_effort(全档原样透传)。
     codexModel: null,      // --codex-model:覆盖 codex 的模型(缺省用本机 config.toml 默认);仅 harness=codex 有意义
-    codexEffort: null,     // --codex-effort:覆盖 codex 的 reasoning effort;仅 harness=codex 有意义
     json: false,
     help: false,
     quiet: false,
     task: [],
   };
   const RENDER_KINDS = ["review"];
+  // 统一档位并集。实测(见 review):claude harness 接受 low/medium/high/xhigh/max;
+  // codex(gpt-5.6-sol 后端)接受 none/low/medium/high/xhigh/max。两 harness 的构造器各自把不支持的
+  // 档就近映射到最接近的支持档(none→low on claude),不报错不丢语义。minimal 两边都不真支持,故不收。
+  const EFFORT_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") opts.help = true;
@@ -407,15 +413,20 @@ function parseArgs(argv, modelKeys) {
       if (!v || !RENDER_KINDS.includes(v)) fail(`--render 需要一个渲染类型参数(当前支持: ${RENDER_KINDS.join(", ")})`);
       opts.render = v;
     }
+    else if (a === "--effort") {
+      const v = argv[++i];
+      if (!v || !EFFORT_LEVELS.includes(v)) fail(`--effort 需要一个档位参数(${EFFORT_LEVELS.join("/")})`);
+      opts.effort = v;
+    }
+    // --codex-effort 已并入统一的 --effort。显式识别并报迁移错误,而不是让它掉进 opts.task 兜底分支——
+    // 否则旧用法会静默失效且把 flag 污染进任务正文(见 review)。
+    else if (a === "--codex-effort") {
+      fail("--codex-effort 已废弃,思考强度统一用 --effort <档>(none/low/medium/high/xhigh/max)");
+    }
     else if (a === "--codex-model") {
       const v = argv[++i];
       if (!v || v.startsWith("--")) fail("--codex-model 需要一个模型名参数");
       opts.codexModel = v;
-    }
-    else if (a === "--codex-effort") {
-      const v = argv[++i];
-      if (!v || v.startsWith("--")) fail("--codex-effort 需要一个 effort 值参数(none/minimal/low/medium/high/xhigh)");
-      opts.codexEffort = v;
     }
     else if (a === "--model") fail("--model 已废弃,请用 --<modelKey>(如 --glm),见 --help");
     else if (a === "--json") opts.json = true;
@@ -452,8 +463,8 @@ ${rows}
   --prompt-file <path>  把文件内容作为前置系统指令注入子进程(如 review prompt 模板)
   --render review       把子进程 result(应为 JSON)渲染成干净审查报告;解析失败则原文降级
   --list-vision         打印支持视觉的模型 key(空格分隔),供命令文件注入;不跑委派
+  --effort <档>         思考强度(none/low/medium/high/xhigh/max);两 harness 通用(claude 上 none 就近取 low)
   --codex-model <名>    仅 --codex:覆盖 codex 模型(缺省用本机 config.toml 默认)
-  --codex-effort <档>   仅 --codex:覆盖 reasoning effort(none/minimal/low/medium/high/xhigh)
   --json                结构化输出(供 workflow 消费)
   --help, -h            打印此帮助
 `);
@@ -564,9 +575,13 @@ async function buildCodexSpawn(opts, cwd, m) {
   const model = opts.codexModel || m.model;
   if (model) args.push(CODEX_FLAGS.model, model);
 
-  // reasoning effort:仅当用户显式给了 --codex-effort
-  if (opts.codexEffort) {
-    args.push(CODEX_FLAGS.config, `model_reasoning_effort="${opts.codexEffort}"`);
+  // reasoning effort:统一的 --effort 翻译成 codex 的 model_reasoning_effort。
+  // 实测(codex-cli 0.144.3 / gpt-5.6-sol 后端):支持 none/low/medium/high/xhigh/max,唯独不认 minimal。
+  // 统一集正好是它的子集(minimal 已从统一集剔除),故全部原样透传——max 不再封顶(它原生支持)。
+  // 注:--codex-model 若指向能力更弱的模型,理论上某档可能被后端 400;那属于该模型的能力边界,
+  // 交给 codex 自身报错(它的 unsupported_value 信息已足够清晰),不在这里按模型硬编码档位表。
+  if (opts.effort) {
+    args.push(CODEX_FLAGS.config, `model_reasoning_effort="${opts.effort}"`);
   }
 
   // 读写边界 → sandbox。统一走 -c sandbox_mode(不用 -s):因为 `codex exec resume` 不接受 -s,
@@ -650,6 +665,14 @@ function buildClaudeSpawn(opts, cwd, m) {
   args.push(CLI_FLAGS.model, m.model);
   // 排除 user settings(避免主环境配置污染),认证来自继承的 shell env
   args.push(CLI_FLAGS.settingSources, "project");
+
+  // 思考强度:透传原生 --effort。CLI 会写进请求体 output_config.effort 发给网关
+  // (实测 gpt/glm/kimi 等非 claude-* 模型名照发)。
+  // claude 原生只认 low/medium/high/xhigh/max,不认 codex 独有的 none —— none 就近映射为 low(最低档)。
+  if (opts.effort) {
+    const claudeEffort = opts.effort === "none" ? "low" : opts.effort;
+    args.push(CLI_FLAGS.effort, claudeEffort);
+  }
 
   // --prompt-file:把模板文件内容作为前置系统指令注入(主 token 零经手)。
   // 用于 review 等"角色/立场指令固定"的场景——指令沉在文件里,不靠主 Claude 现拼进任务文本。
