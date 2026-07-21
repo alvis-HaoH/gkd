@@ -115,17 +115,26 @@ function main() {
   }
   // 追到 fork 链最新节点。除非 --all-cwd,否则不跨目录追:命中链可能 A(X)→B(Y),
   // 在 X 检索却把用户带到 Y 的节点(甚至误入写分支)违背"只看当前目录"预期,故遇到 cwd 切换就停。
+  // 目标 = 整棵可达子树里 ts 最新的成功(ok!==false)节点;全失败才回退到最新节点。
+  // 逐层贪心不够:A→B(成功)→C(失败) 会停在 C(该层仅剩失败子),但 B 才是可续接的正确终点;
+  // 而 B(成功)→C(失败)→D(成功) 又要求继续往下探而非停在 B。故收集全子树再择优。
   function latestDescendant(row) {
-    let cur = row, guard = 0;
-    while (guard++ < 1000) {
+    const reachable = [];
+    const stack = [row];
+    const visited = new Set();
+    let guard = 0;
+    while (stack.length && guard++ < 10000) {
+      const cur = stack.pop();
+      if (visited.has(cur.sessionId)) continue;  // 防环(理论上 fork 链无环,兜底)
+      visited.add(cur.sessionId);
+      reachable.push(cur);
       const kids = byParent.get(cur.sessionId);
-      if (!kids || !kids.length) return cur;
-      // 多个子(从同一点分叉多次)取 ts 最新那支;--all-cwd 时不限目录,否则只跟同 cwd 的后继
-      const eligible = o.allCwd ? kids : kids.filter((k) => k.cwd === cur.cwd);
-      if (!eligible.length) return cur;  // 后继都切到别的目录了,停在当前节点
-      cur = eligible.reduce((a, b) => (new Date(a.ts) >= new Date(b.ts) ? a : b));
+      if (!kids) continue;
+      for (const k of kids) if (o.allCwd || k.cwd === cur.cwd) stack.push(k);  // 非 --all-cwd 遇 cwd 切换即不再下探
     }
-    return cur;
+    const newest = (arr) => arr.reduce((a, b) => (new Date(a.ts) >= new Date(b.ts) ? a : b));
+    const ok = reachable.filter((r) => r.ok !== false);
+    return ok.length ? newest(ok) : newest(reachable);
   }
 
   // 命中行 → 其链最新节点;按 sessionId 去重(多个命中可能属同一条链)

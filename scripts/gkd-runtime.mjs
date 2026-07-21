@@ -18,8 +18,9 @@
 //                       codex:首次把当前对话导入成 codex thread 再续,约 1-2s)
 
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, realpathSync, chmodSync, renameSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, realpathSync, chmodSync, renameSync, unlinkSync, openSync, readSync, closeSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
+import { StringDecoder } from "node:string_decoder";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { importClaudeSessionToCodex } from "./gkd-codex-import.mjs";
@@ -152,6 +153,35 @@ function loadModels() {
 // 扫盘定位 session jsonl,返回 { cwd, jsonlPath }:cwd 是从 jsonl 首条带 cwd 的记录读到的原始
 // 启动目录(用于钉住 child cwd),jsonlPath 是文件本身(codex C 档 import 需要把它交给 app-server)。
 // 找不到返回 null。findSessionCwd 基于它实现,两者共用同一份扫盘逻辑。
+// 按行流式扫描文件,对每行调 onLine;onLine 返回 true 即提前停止(关文件返回)。
+// 避免对可能几十 MB 的 jsonl 做整文件 readFileSync —— 只读到满足条件那一刻。
+// 读不到文件静默返回(调用方自行决定默认值)。
+function scanLines(path, onLine) {
+  let fd;
+  try { fd = openSync(path, "r"); } catch { return; }
+  try {
+    const buf = Buffer.allocUnsafe(65536);
+    // StringDecoder 跨块保留未完成的多字节序列:jsonl 单行(中文历史/中文目录 cwd)常超 64KiB,
+    // 直接 buf.toString 会把切在块边界的多字节字符替换成 U+FFFD 污染内容(如钉错 spawnCwd)。
+    const decoder = new StringDecoder("utf8");
+    let carry = "";
+    let bytes;
+    while ((bytes = readSync(fd, buf, 0, buf.length, null)) > 0) {
+      carry += decoder.write(buf.subarray(0, bytes));
+      let nl;
+      while ((nl = carry.indexOf("\n")) !== -1) {
+        const line = carry.slice(0, nl);
+        carry = carry.slice(nl + 1);
+        if (onLine(line) === true) return;
+      }
+    }
+    carry += decoder.end();
+    if (carry) onLine(carry);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function findSessionJsonl(sessionId) {
   if (!sessionId) return null;
   const projectsDir = join(homedir(), ".claude", "projects");
@@ -168,16 +198,18 @@ function findSessionJsonl(sessionId) {
     if (!existsSync(jsonlPath)) continue;
     // jsonl 的前几行可能是 metadata(type=mode/file-history-snapshot/ai-title 等)没有 cwd 字段,
     // 真正带 cwd 的是首条 user/assistant/system 记录。扫前 50 行内拿第一个 cwd 即可。
-    try {
-      const lines = readFileSync(jsonlPath, "utf8").split("\n", 50);
-      for (const ln of lines) {
-        if (!ln) continue;
-        try {
-          const obj = JSON.parse(ln);
-          if (typeof obj?.cwd === "string" && obj.cwd) return { cwd: obj.cwd, jsonlPath };
-        } catch { /* 单行损坏跳过 */ }
-      }
-    } catch { /* 文件读不到跳过 */ }
+    let found = null;
+    let scanned = 0;
+    scanLines(jsonlPath, (ln) => {
+      if (scanned++ >= 50) return true;  // 只扫前 50 行,拿不到 cwd 就放弃这个文件
+      if (!ln) return false;
+      try {
+        const obj = JSON.parse(ln);
+        if (typeof obj?.cwd === "string" && obj.cwd) { found = { cwd: obj.cwd, jsonlPath }; return true; }
+      } catch { /* 单行损坏跳过 */ }
+      return false;
+    });
+    if (found) return found;
   }
   return null;
 }
@@ -194,21 +226,18 @@ function findSessionCwd(sessionId) {
 // (任务是纯文本,不知道会读什么),那条仍靠命令层约定 + 子进程自身报错兜底。
 function jsonlHasImage(jsonlPath) {
   if (!jsonlPath || !existsSync(jsonlPath)) return false;
-  let text;
-  try {
-    text = readFileSync(jsonlPath, "utf8");
-  } catch {
-    return false;  // 读不到不阻断委派(护栏是尽力而为,不该因 IO 失败卡死正常路径)
-  }
-  // 逐行解析,任一 user/assistant 消息的 content 数组里出现 type:"image" 即判含图。
-  for (const ln of text.split("\n")) {
-    if (!ln || ln.indexOf('"image"') === -1) continue;  // 快速预筛:整行无 image 字样直接跳过
+  // 逐行流式扫描(大历史 jsonl 可能几十 MB,不整文件读入);
+  // 任一 user/assistant 消息的 content 数组里出现 type:"image" 即判含图。
+  let hasImage = false;
+  scanLines(jsonlPath, (ln) => {
+    if (!ln || ln.indexOf('"image"') === -1) return false;  // 快速预筛:整行无 image 字样直接跳过
     try {
       const c = JSON.parse(ln)?.message?.content;
-      if (Array.isArray(c) && c.some((b) => b?.type === "image")) return true;
+      if (Array.isArray(c) && c.some((b) => b?.type === "image")) { hasImage = true; return true; }
     } catch { /* 单行损坏跳过 */ }
-  }
-  return false;
+    return false;
+  });
+  return hasImage;
 }
 
 // ── 委派流水 delegations.jsonl —— 单一 append-only 记录 ────────────────────
@@ -1010,20 +1039,88 @@ async function main() {
     cwd: spawnCwd || undefined,  // null/undefined = 继承父进程 cwd(默认行为)
   });
 
+  // stdout/stderr 累加设上限:子进程输出失控(死循环打印/二进制流)时无限拼接会 OOM。
+  // 达上限即杀子进程并记明确失败——不静默截断 stdout(claude 单体 JSON 被截会变成误导性的
+  // "解析失败",看着像模型坏了实则是我们截的)。stderr 保留尾部供诊断。
+  const MAX_STDOUT = 32 * 1024 * 1024;  // 32 MiB
+  const MAX_STDERR = 4 * 1024 * 1024;   // 4 MiB
+  // 子进程总时限:模型无响应/网络卡死时,没有兜底 main 会永远等 close,gkd 整体僵死。
+  // 显式判空(而非 ||):Number("0")=0 是 falsy 会被 || 吞掉;约定 <=0 = 禁用超时(不设 killTimer),
+  // 供已知会超 30 分钟的长任务显式关兜底。非法值(NaN)回落默认。
+  const envTimeout = Number(process.env.GKD_TIMEOUT_MS);
+  const TIMEOUT_MS = Number.isFinite(envTimeout) ? envTimeout : 30 * 60 * 1000;  // 默认 30 分钟
+  const KILL_GRACE_MS = 5000;  // SIGTERM 后宽限,再 SIGKILL
+
   let stdout = "";
   let stderr = "";
-  child.stdout.on("data", (d) => (stdout += d));
-  child.stderr.on("data", (d) => (stderr += d));
+  let stdoutBytes = 0;         // 按字节累计(非 .length 的 UTF-16 码元),用于对齐 MiB 上限语义
+  let abortReason = null;      // 非 null = 我们主动杀的(timeout/overflow),close 时据此判失败
+  let killTimer = null;
+  let graceTimer = null;
 
-  child.on("error", (e) => fail(`无法启动 ${harness} 子进程(${cli}): ${e.message}`));
+  // SIGTERM → 宽限 → SIGKILL。reason 记下来供 close 归一成失败结果。
+  function abort(reason) {
+    if (abortReason) return;   // 已在中止流程中,不重复
+    abortReason = reason;
+    try { child.kill("SIGTERM"); } catch { /* 已退出 */ }
+    graceTimer = setTimeout(() => { try { child.kill("SIGKILL"); } catch { /* 已退出 */ } }, KILL_GRACE_MS);
+  }
+
+  if (TIMEOUT_MS > 0) {
+    const timeoutLabel = TIMEOUT_MS >= 60000 ? `${Math.round(TIMEOUT_MS / 60000)} 分钟` : `${Math.round(TIMEOUT_MS / 1000)} 秒`;
+    killTimer = setTimeout(() => abort(`子进程超时(>${timeoutLabel}无完成),已终止`), TIMEOUT_MS);
+  }
+
+  child.stdout.on("data", (d) => {
+    if (abortReason) return;   // 已在中止流程中:停止收集,别在 SIGKILL 落地前的宽限窗口里继续膨胀
+    stdoutBytes += d.length;   // d 是 Buffer,.length 即字节数
+    stdout += d;
+    if (stdoutBytes > MAX_STDOUT) abort(`子进程 stdout 超过 ${Math.round(MAX_STDOUT / 1048576)}MiB 上限,已终止`);
+  });
+  child.stderr.on("data", (d) => {
+    if (abortReason) return;
+    stderr += d;
+    // 只保尾部,不因日志刷屏 OOM。按字符裁剪(诊断用,精度无所谓),4MiB 字符量级足够。
+    if (stderr.length > MAX_STDERR) stderr = stderr.slice(-MAX_STDERR);
+  });
+
+  // finishOnce:timeout/overflow/close/error 可能交叉触发,收尾逻辑(清 timer、清临时文件、
+  // 落 delegation、输出、退出)必须且只跑一次。
+  let finished = false;
+  function clearTimers() {
+    if (killTimer) { clearTimeout(killTimer); killTimer = null; }
+    if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+  }
+
+  child.on("error", (e) => {
+    if (finished) return;
+    finished = true;
+    clearTimers();
+    // 启动失败时 parseCodexOutput 不会跑,outFile 若已建则残留,这里兜底清。
+    if (outFile) { try { unlinkSync(outFile); } catch { /* 可能还没建 */ } }
+    fail(`无法启动 ${harness} 子进程(${cli}): ${e.message}`);
+  });
 
   child.on("close", (code) => {
+    if (finished) return;
+    finished = true;
+    clearTimers();
     // 两个 harness 归一成同一形状:{ result, sessionId, isError, usage, modelUsed }。
     // usage = { "<model名>": { inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens } },
     // 与 delegations.jsonl / gkd-stats 期望的 camelCase shape 一致。
-    const norm = harness === "codex"
+    let norm = harness === "codex"
       ? parseCodexOutput(stdout, stderr, outFile, code, { modelOverride: opts.codexModel, quiet: opts.quiet })
       : parseClaudeOutput(stdout, stderr, code);
+
+    // 我们主动杀的(超时/输出超限):判失败,但别丢弃子进程已完整产出的结果。
+    // 竞态——killTimer 到点的同一刻子进程恰好已把完整 JSON 写完并正常退出,parse 能拿到成功
+    // result;此时只标 isError(让 delegation 记 ok:false)、把 abort 原因追加到 result 尾部,
+    // 产出仍可达,不让用户白烧 token。只有 parse 本就失败/无 result 时才整体替换成原因串。
+    if (abortReason) {
+      norm = norm.result && !norm.isError
+        ? { ...norm, result: `${norm.result}\n\n[gkd] ${abortReason}`, isError: true }
+        : { ...norm, result: abortReason, isError: true };
+    }
 
     // 只追加一条 delegation 行:其 sessionCwd 字段兼任「续本目录上次」的索引(取代旧 sessions.json)。
     appendDelegation({
@@ -1073,7 +1170,16 @@ function parseClaudeOutput(stdout, stderr, code) {
   try {
     parsed = JSON.parse(stdout);
   } catch {
-    fail(`子进程输出非 JSON(exit ${code}):\n${stdout.slice(0, 500)}\n${stderr.slice(0, 300)}`);
+    // 不 fail():子进程已跑完(可能烧了 token),此处直接退出会让 close 回调里的 appendDelegation
+    // 落不了盘,session/cost 记录丢失、续接链断环。改为返回 isError 的归一结果,让调用方统一
+    // 落一行(ok:false)再输出+退出。sessionId 为 null——非 JSON 输出里拿不到,该次无法被续接。
+    return {
+      result: `子进程输出非 JSON(exit ${code}):\n${stdout.slice(0, 500)}\n${stderr.slice(0, 300)}`,
+      sessionId: null,
+      isError: true,
+      usage: {},
+      modelUsed: [],
+    };
   }
   return {
     result: parsed.result ?? "",

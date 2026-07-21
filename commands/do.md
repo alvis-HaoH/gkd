@@ -41,6 +41,8 @@ __GKD_TASK_EOF__
 
 5. **运行模式**:**默认 `run_in_background: true`**。Bash 前台默认 2 分钟超时会杀子进程丢进度,而装库/批量改/多次 LLM 调用常超时。只有确信 < 30 秒(改单文件一两行)才前台,且必须传 `timeout: 600000`,绝不用默认。不确定就后台。
 
+   > runtime 内部对委派子进程有默认 **30 分钟**超时兜底(防子进程僵死),到点 SIGTERM→SIGKILL 并归一成失败。若这次是**预计会超 30 分钟的大任务**(超大批量改、逐文件长生成),在 runtime 命令前加环境变量提高上限或关闭:`GKD_TIMEOUT_MS=3600000`(1 小时)或 `GKD_TIMEOUT_MS=0`(禁用),否则任务会在 30 分钟被杀、白烧 token。常规任务不用管,用默认即可。
+
 ## 输出处理
 
 - 后台:Bash 立刻返回 task_id,报给用户("已在后台启动,task: `<id>`,跑完会通知")并**立刻还控制权,不要 TaskOutput 阻塞**。收到 `<task-notification>` 后 Read 那个 `.output` 文件,把 result 汇报给用户。

@@ -8,11 +8,11 @@
       "pricingKey": "fireworks_ai/glm-5p2"
     },
     "kimi": {
-      "model": "kimi-k2.6",
+      "model": "kimi-k3",
       "baseUrl": "${ANTHROPIC_BASE_URL}",
       "authToken": "${ANTHROPIC_AUTH_TOKEN}",
       "supportsVision": true,
-      "pricingKey": "moonshot/kimi-k2.6",
+      "pricingKey": "moonshot/kimi-k3",
       "env": { "_comment_env": "可选。某些网关端点未适配新版 CLI 的 adaptive thinking,会 400 报错;此时设 MAX_THINKING_TOKENS 为 0 关闭 thinking。不需要就删掉整个 env。", "MAX_THINKING_TOKENS": "0" }
     },
     "deepseek": {
